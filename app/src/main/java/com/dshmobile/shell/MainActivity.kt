@@ -52,6 +52,8 @@ class MainActivity : ComponentActivity() {
   private val pickToken: String = EngineManager.ensurePickToken()
   private lateinit var engineStatus: TextView
   private lateinit var progressText: TextView
+  /** Shizuku 授权状态提示（引导页）。 */
+  private lateinit var shizukuStatusText: TextView
   /** 启动/测试双态界面（v0.11.0）：解压进度条、崩溃横幅、engine.log 摘要。 */
   private lateinit var progressBar: ProgressBar
   private lateinit var crashBanner: TextView
@@ -1014,6 +1016,12 @@ class MainActivity : ComponentActivity() {
       visibility = View.GONE
     }
     engineStatus = TextView(this).apply { textSize = 16f; setPadding(0, 0, 0, pad); gravity = android.view.Gravity.CENTER }
+    // Shizuku 授权状态（引导页常驻提示：未授权时引导用户设置，授权后显示就绪）。
+    shizukuStatusText = TextView(this).apply {
+      textSize = 12f
+      setPadding(0, 0, 0, (4 * density).toInt())
+      gravity = android.view.Gravity.CENTER
+    }
     // 解压/更新进度条（仅快照刷新时可见）。
     progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
       visibility = View.GONE
@@ -1073,6 +1081,7 @@ class MainActivity : ComponentActivity() {
     guide.addView(title)
     guide.addView(crashBanner)
     guide.addView(engineStatus)
+    guide.addView(shizukuStatusText)
     guide.addView(progressBar)
     guide.addView(progressText)
     guide.addView(logSummary)
@@ -1232,6 +1241,12 @@ class MainActivity : ComponentActivity() {
   private fun showGuide() {
     webView.visibility = View.GONE
     guideView.visibility = View.VISIBLE
+    // Shizuku 状态实时刷新
+    shizukuStatusText.text = if (ShizukuShellExecutor.isAvailable()) {
+      "\u2705 Shizuku 已授权"
+    } else {
+      "\u26A0\uFE0F Shizuku 未授权 — 安装 Shizuku App 并授权后可操控手机"
+    }
     val crash = crashInfo
     if (crash != null) {
       crashBanner.visibility = View.VISIBLE

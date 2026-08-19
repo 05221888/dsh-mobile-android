@@ -376,6 +376,13 @@ class EngineManager(private val context: Context, private val pickToken: String?
     // 插件 id 名装载，DSH 从 profile web/node_modules 解析包。
     applyAssetPatchAppend("patched/dsh-android-control/cordis.patch.yml",
       File(home, "profiles/web/cordis.patch.yml"), "android-control")
+    // 桌面插件移植（幂等，仅装一次）：通知音效、会话删除、模型故障切换。
+    // 判断不放的：dsh-rtk（Windows 专属 exe）、dsh-imagegen（体积大+需配置面
+    // 板）、dsh-leisure-zone（桌面 UI 专属）、dsh-compaction-instant（依赖版本
+    // 兼容性待验证）。
+    installMobilePlugin("dsh-notify-sound", "dsh-notify-sound", home, false)
+    installMobilePlugin("dsh-plugin-session-delete", "dsh-plugin-session-delete", home, false)
+    installMobilePlugin("@dsh-external/dsh-model-failover", "dsh-model-failover", home, true)
   }
 
   /**
@@ -425,6 +432,71 @@ class EngineManager(private val context: Context, private val pickToken: String?
       Log.i(TAG, "dsh-android-control installed to " + pluginDir.absolutePath)
     } catch (e: Exception) {
       Log.e(TAG, "install dsh-android-control failed", e)
+    }
+  }
+
+  /**
+   * 安装桌面对口插件到快照 profile（幂等，装一次）。插件来自
+   * assets/patched/<assetDir>/（含 package.json + lib|src）。
+   * @param scoped true = @dsh-external/dsh-model-failover 这类带 scope 的包，
+   *  装入 profiles/web/node_modules/@scope/pkg。
+   */
+  private fun installMobilePlugin(assetDir: String, pkgName: String, home: File, scoped: Boolean) {
+    try {
+      val webNodeModules = File(home, "profiles/web/node_modules")
+      val target = if (scoped) {
+        val scope = pkgName.substringBefore('/')
+        File(File(webNodeModules, scope), pkgName.substringAfter('/'))
+      } else {
+        File(webNodeModules, pkgName)
+      }
+      if (File(target, "package.json").exists() && File(target, "package.json").length() > 0) return
+      target.mkdirs()
+      copyAssetTree("patched/$assetDir", target)
+      // DSH loader 需要 profiles 顶层 node_modules 也能解析（部分版本）。
+      val topTarget = if (scoped) {
+        val scope = pkgName.substringBefore('/')
+        File(File(File(home, "profiles/node_modules"), scope), pkgName.substringAfter('/'))
+      } else {
+        File(File(home, "profiles/node_modules"), pkgName)
+      }
+      if (!File(topTarget, "package.json").exists()) {
+        topTarget.mkdirs()
+        copyAssetTree("patched/$assetDir", topTarget)
+      }
+      // cordis insert 装载条目
+      val patchLine = "- insert:\n" +
+        "    - id: " + pkgName.replace("/", "-") + "\n" +
+        "      name: " + pkgName + "\n"
+      val patchFile = File(home, "profiles/web/cordis.patch.yml")
+      if (patchFile.exists() && patchFile.readText().contains(pkgName)) return
+      val sep = if (patchFile.exists() && patchFile.readText().isNotBlank()) "\n" else ""
+      patchFile.appendText(sep + patchLine.trimEnd() + "\n")
+      Log.i(TAG, "desktop plugin installed: $pkgName -> " + target.absolutePath)
+    } catch (e: Exception) {
+      Log.e(TAG, "install desktop plugin $pkgName failed", e)
+    }
+  }
+
+  /** 把 assets 下的一棵目录树复制到目标目录（递归）。 */
+  private fun copyAssetTree(assetPrefix: String, target: File) {
+    try {
+      val list = context.assets.list(assetPrefix) ?: emptyArray()
+      for (name in list) {
+        val assetPath = if (assetPrefix.isEmpty()) name else "$assetPrefix/$name"
+        val isDir = context.assets.list(assetPath)?.isNotEmpty() == true
+        val t = File(target, name)
+        if (isDir) {
+          t.mkdirs()
+          copyAssetTree(assetPath, t)
+        } else {
+          context.assets.open(assetPath).use { input ->
+            t.outputStream().use { out -> input.copyTo(out) }
+          }
+        }
+      }
+    } catch (e: Exception) {
+      Log.e(TAG, "copyAssetTree $assetPrefix failed", e)
     }
   }
 
