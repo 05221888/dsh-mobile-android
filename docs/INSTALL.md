@@ -90,14 +90,12 @@ A: 会话列表 → 点垃圾桶图标（dsh-plugin-session-delete 插件提供�
 
 ## 插件清单
 
-本 APK 内置以下额外插件（桌面版移植）：
+本 APK 内置以下额外插件：
 
 | 插件 | 功能 |
 |------|------|
 | `dsh-android-control` | 28 个安卓控制工具（截图/点击/打开应用等） |
-| `dsh-notify-sound` | 操作反馈音效 |
 | `dsh-plugin-session-delete` | 永久删除会话 |
-| `@dsh-external/dsh-model-failover` | 模型故障自动切换 provider |
 
 ## 技术架构
 

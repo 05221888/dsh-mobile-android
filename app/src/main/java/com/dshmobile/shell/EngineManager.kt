@@ -376,13 +376,13 @@ class EngineManager(private val context: Context, private val pickToken: String?
     // 插件 id 名装载，DSH 从 profile web/node_modules 解析包。
     applyAssetPatchAppend("patched/dsh-android-control/cordis.patch.yml",
       File(home, "profiles/web/cordis.patch.yml"), "android-control")
-    // 桌面插件移植（幂等，仅装一次）：通知音效、会话删除、模型故障切换。
-    // 判断不放的：dsh-rtk（Windows 专属 exe）、dsh-imagegen（体积大+需配置面
-    // 板）、dsh-leisure-zone（桌面 UI 专属）、dsh-compaction-instant（依赖版本
-    // 兼容性待验证）。
-    installMobilePlugin("dsh-notify-sound", "dsh-notify-sound", home, false)
+    // 桌面插件移植（幂等，仅装一次）：会话删除（只依赖 dsh-tools，快照具备）。
+    // 判断不放/已移除：dsh-notify-sound（import "ws"，快照 profile 顶层无 ws
+    // symlink → 引擎加载崩溃）、dsh-model-failover（import "schemastery" 裸包，
+    // 快照只有 @deepseek-ai/schemastery → 同样崩溃）、dsh-rtk（Windows exe）、
+    // dsh-imagegen（体积大+需配置面板）、dsh-leisure-zone（桌面 UI）、
+    // dsh-compaction-instant（依赖版本兼容性待验证）。
     installMobilePlugin("dsh-plugin-session-delete", "dsh-plugin-session-delete", home, false)
-    installMobilePlugin("@dsh-external/dsh-model-failover", "dsh-model-failover", home, true)
   }
 
   /**
