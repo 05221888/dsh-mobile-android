@@ -464,10 +464,11 @@ class EngineManager(private val context: Context, private val pickToken: String?
         topTarget.mkdirs()
         copyAssetTree("patched/$assetDir", topTarget)
       }
-      // cordis insert 装载条目
+      // cordis insert 装载条目（YAML 要求 @ 等特殊字符加引号）
+      val safeId = pkgName.replace("/", "-")
       val patchLine = "- insert:\n" +
-        "    - id: " + pkgName.replace("/", "-") + "\n" +
-        "      name: " + pkgName + "\n"
+        "    - id: '" + safeId + "'\n" +
+        "      name: '" + pkgName + "'\n"
       val patchFile = File(home, "profiles/web/cordis.patch.yml")
       if (patchFile.exists() && patchFile.readText().contains(pkgName)) return
       val sep = if (patchFile.exists() && patchFile.readText().isNotBlank()) "\n" else ""
