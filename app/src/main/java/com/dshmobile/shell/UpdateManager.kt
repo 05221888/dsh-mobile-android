@@ -208,7 +208,7 @@ class UpdateManager(private val context: Context) {
 
   companion object {
     /** Emulator reaches the host loopback alias; production overrides via manifestUrl. */
-    const val DEFAULT_MANIFEST_URL = "https://github.com/kelai141/dsh-mobile-apk/releases/latest/download/manifest.json"
+    const val DEFAULT_MANIFEST_URL = "https://gitee.com/wushenghuang/dsh-mobile-releases/releases/download/v0.12.0/manifest.json"
     const val MAX_SNAPSHOT_BYTES = 500L * 1024 * 1024
     /** manifest 体积上限（64KB，防恶意/异常大 manifest OOM）。 */
     const val MAX_MANIFEST_BYTES = 64L * 1024
