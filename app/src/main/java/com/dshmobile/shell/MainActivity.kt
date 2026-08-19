@@ -1103,7 +1103,16 @@ class MainActivity : ComponentActivity() {
       text = "Shizuku 授权"
       setOnClickListener { openShizukuSetup() }
     }
-    guide.addView(buttonRow(shizukuRow))
+    val testBridgeBtn = Button(this).apply {
+      text = "测试桥接"
+      setOnClickListener {
+        Thread {
+          val result = ShizukuManager.testBridge()
+          runOnUiThread { showTestNotification("Shizuku 自检", result) }
+        }.start()
+      }
+    }
+    guide.addView(buttonRow(shizukuRow, testBridgeBtn))
     return guide
   }
 

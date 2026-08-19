@@ -74,4 +74,22 @@ object ShizukuManager {
     "DSH_BRIDGE_TOKEN" to ensureToken(),
     "DSH_BRIDGE_PORT" to ShizukuBridgeServer.BRIDGE_PORT.toString(),
   )
+
+  /**
+   * 桥接自检：尝试经 Shizuku 执行一条无害命令（echo ok）。
+   * @return 状态描述（成功/失败原因），供设置页「测试桥接」展示。
+   */
+  fun testBridge(): String {
+    if (!ShizukuShellExecutor.isAvailable()) return "Shizuku 未授权：先安装并授权 Shizuku App"
+    return try {
+      val result = ShizukuShellExecutor.exec(arrayOf("/system/bin/echo", "ok"), 8_000, wantBinary = false)
+      if (result.optBoolean("ok")) {
+        "Shizuku 桥接正常（echo ok，exit 0）"
+      } else {
+        "桥接异常：exit " + result.optInt("exitCode", -1) + " stderr=" + result.optString("stderr", "")
+      }
+    } catch (e: IllegalStateException) {
+      "桥接失败：" + (e.message ?: e.javaClass.simpleName)
+    }
+  }
 }

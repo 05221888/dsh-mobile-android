@@ -88,7 +88,16 @@ class ShizukuBridgeServer(
       // 读取请求行
       val requestLine = reader.readLine() ?: return
       val parts = requestLine.split(" ")
-      if (parts.size < 3 || parts[0] != "POST" || !parts[1].endsWith("/exec")) {
+      if (parts.size < 3 || parts[0] != "POST") {
+        respond(writer, 404, "{\"ok\":false,\"error\":\"not found\"}")
+        return
+      }
+      // GET /ping 健康检查（设置页「测试桥接」用，无需 token）。
+      if (parts[1].endsWith("/ping")) {
+        respond(writer, 200, "{\"ok\":true,\"bridge\":\"running\"}")
+        return
+      }
+      if (!parts[1].endsWith("/exec")) {
         respond(writer, 404, "{\"ok\":false,\"error\":\"not found\"}")
         return
       }

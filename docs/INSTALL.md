@@ -69,6 +69,7 @@ Shizuku 是一个 Android 开源工具，让普通应用获得 `adb shell` 级�
   - 打开 Termux（如果已安装）
   - 检查运行时更新（在线更新快照）
   - Shizuku 授权（安装/打开 Shizuku）
+  - 测试桥接（自检 Shizuku 桥接是否正常）
 
 ## 常见问题
 
