@@ -376,13 +376,14 @@ class EngineManager(private val context: Context, private val pickToken: String?
     // 插件 id 名装载，DSH 从 profile web/node_modules 解析包。
     applyAssetPatchAppend("patched/dsh-android-control/cordis.patch.yml",
       File(home, "profiles/web/cordis.patch.yml"), "android-control")
-    // 桌面插件移植（幂等，仅装一次）：会话删除（只依赖 dsh-tools，快照具备）。
+    // 桌面插件移植（幂等，仅装一次）：会话删除（@huanlin/dsh-plugin-session-delete，
+    // 只依赖 @deepseek-ai/dsh-tools，快照具备）。
     // 判断不放/已移除：dsh-notify-sound（import "ws"，快照 profile 顶层无 ws
     // symlink → 引擎加载崩溃）、dsh-model-failover（import "schemastery" 裸包，
     // 快照只有 @deepseek-ai/schemastery → 同样崩溃）、dsh-rtk（Windows exe）、
     // dsh-imagegen（体积大+需配置面板）、dsh-leisure-zone（桌面 UI）、
     // dsh-compaction-instant（依赖版本兼容性待验证）。
-    installMobilePlugin("dsh-plugin-session-delete", "dsh-plugin-session-delete", home, false)
+    installMobilePlugin("@huanlin/dsh-plugin-session-delete", "@huanlin/dsh-plugin-session-delete", home, true)
   }
 
   /**
@@ -464,10 +465,11 @@ class EngineManager(private val context: Context, private val pickToken: String?
         topTarget.mkdirs()
         copyAssetTree("patched/$assetDir", topTarget)
       }
-      // cordis insert 装载条目（YAML 要求 @ 等特殊字符加引号）
-      val safeId = pkgName.replace("/", "-")
+      // cordis insert 装载条目（YAML 要求 @ 等特殊字符加引号）。
+      // id 与 name 相同，DSH loader 用 name 解析模块，client 端注册 id 也需一致
+      // （如 @huanlin/dsh-plugin-session-delete 的 client.js 注册 id 与之相同）。
       val patchLine = "- insert:\n" +
-        "    - id: '" + safeId + "'\n" +
+        "    - id: '" + pkgName + "'\n" +
         "      name: '" + pkgName + "'\n"
       val patchFile = File(home, "profiles/web/cordis.patch.yml")
       if (patchFile.exists() && patchFile.readText().contains(pkgName)) return
