@@ -2,7 +2,6 @@ package com.dshmobile.shell
 
 import android.content.Context
 import android.util.Log
-import androidx.annotation.MainThread
 import rikka.shizuku.ShizukuProvider
 
 /**
@@ -19,6 +18,10 @@ object ShizukuManager {
   @Volatile
   private var sharedToken: String? = null
 
+  /** 进程级桥接服务器单例（EngineService 看门狗重启引擎时复用，防重复 bind）。 */
+  @Volatile
+  private var bridgeServer: ShizukuBridgeServer? = null
+
   /** 获取（或首次生成）桥接 token；引擎 env 的 DSH_BRIDGE_TOKEN 保持一致。 */
   fun ensureToken(): String {
     sharedToken?.let { return it }
@@ -31,18 +34,18 @@ object ShizukuManager {
   fun isAvailable(): Boolean = ShizukuShellExecutor.isAvailable()
 
   /**
-   * 主线程调用：确保桥接 token 文件已写 + 服务器运行（引擎启动后由
-   * EngineManager 调用）。token 文件先写（插件始终能读到，仅本地环回
-   * 用）；Shizuku 已授权时才启动 HTTP 服务器，否则跳过——插件会回退
-   * su 通道或返回明确错误。
+   * 确保桥接 token 文件已写 + 服务器运行（引擎启动后由 EngineManager 调用）。
+   * token 文件总是写（幂等，插件在加载时读取）；Shizuku 已授权时才启动
+   * HTTP 服务器，否则跳过——插件会回退 su 通道或返回明确错误。单例：
+   * 引擎多次启动（看门狗）不会重复 bind 端口。
    */
-  @MainThread
   fun ensureBridgeRunning(context: Context) {
-    // token 文件总是写（幂等）：插件在加载时读取；授权后重启引擎即生效。
+    // token 文件总是写（幂等）：插件通过 $HOME/.dsh-bridge-token 读取。
     try {
       val home = java.io.File(context.filesDir, "home")
       val tokenFile = ShizukuBridgeServer.tokenFile(home)
       if (!tokenFile.exists()) tokenFile.writeText(ensureToken())
+      else if (sharedToken == null) sharedToken = tokenFile.readText().trim()
       Log.i(TAG, "bridge token file ready: " + tokenFile.absolutePath)
     } catch (t: Throwable) {
       Log.e(TAG, "token file write failed", t)
@@ -52,9 +55,14 @@ object ShizukuManager {
       return
     }
     try {
+      if (bridgeServer != null) {
+        Log.i(TAG, "Shizuku bridge already running (singleton)")
+        return
+      }
       val home = java.io.File(context.filesDir, "home")
       val server = ShizukuBridgeServer(ensureToken(), home)
       server.start()
+      bridgeServer = server
       Log.i(TAG, "Shizuku bridge running (port " + ShizukuBridgeServer.BRIDGE_PORT + ")")
     } catch (t: Throwable) {
       Log.e(TAG, "bridge start failed", t)

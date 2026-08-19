@@ -54,6 +54,8 @@ class MainActivity : ComponentActivity() {
   private lateinit var progressText: TextView
   /** Shizuku 授权状态提示（引导页）。 */
   private lateinit var shizukuStatusText: TextView
+  /** 首次使用引导步骤提示（引导页，.onboarded 标记不存在时展示）。 */
+  private lateinit var setupGuideText: TextView
   /** 启动/测试双态界面（v0.11.0）：解压进度条、崩溃横幅、engine.log 摘要。 */
   private lateinit var progressBar: ProgressBar
   private lateinit var crashBanner: TextView
@@ -1022,6 +1024,15 @@ class MainActivity : ComponentActivity() {
       setPadding(0, 0, 0, (4 * density).toInt())
       gravity = android.view.Gravity.CENTER
     }
+    // 首次使用引导步骤（.onboarded 不存在时显示，引导用户完成配置）。
+    setupGuideText = TextView(this).apply {
+      textSize = 13f
+      setTextColor(0xFFE6A23C.toInt())
+      setPadding(0, 0, 0, (8 * density).toInt())
+      gravity = android.view.Gravity.START
+      text = buildSetupGuideText()
+      visibility = if (File(filesDir, ".onboarded").exists()) View.GONE else View.VISIBLE
+    }
     // 解压/更新进度条（仅快照刷新时可见）。
     progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
       visibility = View.GONE
@@ -1080,6 +1091,7 @@ class MainActivity : ComponentActivity() {
     guide.addView(icon)
     guide.addView(title)
     guide.addView(crashBanner)
+    guide.addView(setupGuideText)
     guide.addView(engineStatus)
     guide.addView(shizukuStatusText)
     guide.addView(progressBar)
@@ -1129,7 +1141,10 @@ class MainActivity : ComponentActivity() {
     Thread {
       try {
       if (EngineProbe.check().optBoolean("running", false)) {
-        runOnUiThread { showWeb() }
+        runOnUiThread {
+          markOnboarded()
+          showWeb()
+        }
         return@Thread
       }
       // 启动即有反馈：进入测试界面显示"正在启动引擎…"（不再白屏等 probe）。
@@ -1176,7 +1191,10 @@ class MainActivity : ComponentActivity() {
         if (EngineProbe.check().optBoolean("running", false)) {
           startEngineService()
           applyShizukuKeepAlive()
-          runOnUiThread { showWeb() }
+          runOnUiThread {
+            markOnboarded()
+            showWeb()
+          }
           return@Thread
         }
         Thread.sleep(1000)
@@ -1235,6 +1253,25 @@ class MainActivity : ComponentActivity() {
     // The WebView may have rendered an error page before the engine was
     // ready (engine boot takes seconds); reload now that it answers.
     webView.reload()
+  }
+
+  /** 首次使用引导文案：一行一个步骤，傻瓜化引导完成「配 API → 授权 Shizuku」。 */
+  private fun buildSetupGuideText(): String {
+    val sb = StringBuilder()
+    sb.append("首次使用三步：\n")
+    sb.append("1. 在设置中配置模型服务（中转站 API Key）\n")
+    sb.append("2. 点下方「Shizuku 授权」安装并授权（可选，用于操控手机）\n")
+    sb.append("3. 右上角重试启动引擎，即可开始提问\n")
+    return sb.toString()
+  }
+
+  /** 引擎首次成功启动后写入 .onboarded，下次不再显示步骤引导。 */
+  private fun markOnboarded() {
+    try {
+      if (!File(filesDir, ".onboarded").exists()) File(filesDir, ".onboarded").writeText("1")
+      if (::setupGuideText.isInitialized) setupGuideText.visibility = View.GONE
+    } catch (_: Exception) {
+    }
   }
 
   /** 进入测试界面（引擎失败/未就绪回退）：状态 + 崩溃横幅 + engine.log 摘要。 */
