@@ -53,6 +53,9 @@ class EngineManager(private val context: Context, private val pickToken: String?
    */
   fun snapshotFresh(): Boolean {
     if (!nodeBin.exists()) return false
+    // 在线更新运行时优先：在线指纹存在即视为最新（不重解压内嵌快照，避免把
+    // 在线更新覆盖回出厂）。运行时补丁每次启动都会重打，在线运行时同样受益。
+    if (File(context.filesDir, ".online-fingerprint").exists()) return true
     val fp = bundledFingerprint()
     if (fp.isEmpty()) return true // 无指纹文件（旧构建）不强制重解压
     return fingerprintFile().exists() && fingerprintFile().readText().trim() == fp
@@ -363,6 +366,66 @@ class EngineManager(private val context: Context, private val pickToken: String?
       File(homeDir, "vision-mcp/server.mjs"), "Qwen-VL")
     applyAssetPatchAppend("patched/cordis.patch.yml",
       File(home, "profiles/web/cordis.patch.yml"), "mcp-vision")
+    applyAssetPatchAppend("patched/cordis-pwsh-fix.yml",
+      File(home, "profiles/web/cordis.patch.yml"), "dsh-mobile-pwsh-fix")
+    // dsh-android-control 插件安装：把 28 个安卓工具插件打入快照的 profile
+    // node_modules，并追加 cordis insert。插件读取 HOME/.dsh-bridge-token
+    // 获取 Shizuku 桥接 token（由 ShizukuManager 生成）。
+    installAndroidControlPlugin(home)
+    // 追加 android-control 装载条目（与 shell-termux/ui-responsive 同款 insert）——
+    // 插件 id 名装载，DSH 从 profile web/node_modules 解析包。
+    applyAssetPatchAppend("patched/dsh-android-control/cordis.patch.yml",
+      File(home, "profiles/web/cordis.patch.yml"), "android-control")
+  }
+
+  /**
+   * 安装 dsh-android-control 安卓控制插件到快照 profile（幂等）：
+   *  1) 把 assets/patched/dsh-android-control/{index.js,package.json,cordis.patch.yml,lib/client.js}
+   *     复制到 DSH profiles 的 node_modules 下（与 @dsh-android 同级）；
+   *  2) 在 profiles/web/node_modules/ 建 dsh-android-control 链接（DSH profile
+   *     模块解析靠自身 node_modules 树）。
+   *  插件经 cordis.patch.yml insert 由 DSH 引擎装载（见 applyAssetPatchAppend
+   *  对 cordis.patch.yml 的追加），此处只负责把包文件放到位。
+   */
+  private fun installAndroidControlPlugin(home: File) {
+    try {
+      // DSH profile 期解析在 HOME/.dsh/profiles/web；node_modules 是其内部目录。
+      val webNodeModules = File(home, "profiles/web/node_modules")
+      val pluginDir = File(webNodeModules, "dsh-android-control")
+      if (File(pluginDir, "index.js").exists()) return // 已安装
+      pluginDir.mkdirs()
+      val files = listOf(
+        "index.js", "package.json", "cordis.patch.yml",
+      )
+      for (name in files) {
+        context.assets.open("patched/dsh-android-control/$name").use { input ->
+          File(pluginDir, name).outputStream().use { out -> input.copyTo(out) }
+        }
+      }
+      // lib/client.js
+      val libDir = File(pluginDir, "lib").apply { mkdirs() }
+      context.assets.open("patched/dsh-android-control/lib/client.js").use { input ->
+        File(libDir, "client.js").outputStream().use { out -> input.copyTo(out) }
+      }
+      // profile 顶层 node_modules 也放一份（某些 DSH 版本从这里解析）
+      val topNodeModules = File(home, "profiles/node_modules")
+      val topPlugin = File(topNodeModules, "dsh-android-control")
+      if (!File(topPlugin, "index.js").exists()) {
+        topPlugin.mkdirs()
+        for (name in files) {
+          context.assets.open("patched/dsh-android-control/$name").use { input ->
+            File(topPlugin, name).outputStream().use { out -> input.copyTo(out) }
+          }
+        }
+        val topLib = File(topPlugin, "lib").apply { mkdirs() }
+        context.assets.open("patched/dsh-android-control/lib/client.js").use { input ->
+          File(topLib, "client.js").outputStream().use { out -> input.copyTo(out) }
+        }
+      }
+      Log.i(TAG, "dsh-android-control installed to " + pluginDir.absolutePath)
+    } catch (e: Exception) {
+      Log.e(TAG, "install dsh-android-control failed", e)
+    }
   }
 
   /** 覆盖式补丁：目标已含标记串则跳过。 */
@@ -413,6 +476,9 @@ class EngineManager(private val context: Context, private val pickToken: String?
     }
     return try {
       applyRuntimePatches()
+      // 启动 Shizuku 桥接服务器（dsh-android-control 插件通过 HTTP 发送
+      // android_* 命令到本地桥；Shizuku 不可用时插件会回退 su 通道）。
+      ShizukuManager.ensureBridgeRunning(context)
       val args = arrayOf(
         nodeBin.absolutePath, "--expose-internals", dshBin.absolutePath, "web", "--port", port.toString(),
       )
@@ -498,7 +564,11 @@ class EngineManager(private val context: Context, private val pickToken: String?
       "DSH_PICK_TOKEN" to (pickToken ?: ""),
       // 视觉后端（Qwen-VL）API key：从私有文件读取，避免硬编码进源码。
       "DASHSCOPE_API_KEY" to (File(context.filesDir, "dashscope-key.txt").takeIf { it.exists() }?.readText()?.trim() ?: ""),
-    )
+      // Shizuku 桥接环境变量（dsh-android-control 插件读取 DSH_BRIDGE_PORT
+      // 和 token 文件路径；插件本身通过 process.env.HOME + '/.dsh-bridge-token'
+      // 读取 token，引擎 HOME 已指向 homeDir）。
+      "DSH_BRIDGE_PORT" to ShizukuBridgeServer.BRIDGE_PORT.toString(),
+    ) + ShizukuManager.envInject()
   }
 
   companion object {

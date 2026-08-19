@@ -28,6 +28,7 @@ class AndroidBridge(
   private val onOpenConsole: () -> Unit = {},
   private val onGetDevLogEnabled: () -> Boolean = { false },
   private val onSetDevLogEnabled: (Boolean) -> Unit = {},
+  private val onOpenShizukuSetup: () -> Unit = {},
 ) {
 
   @JavascriptInterface
@@ -131,6 +132,26 @@ class AndroidBridge(
   @JavascriptInterface
   fun setDevLogEnabled(enabled: Boolean) {
     onSetDevLogEnabled(enabled)
+  }
+
+  /** Shizuku 状态：可用性 + 版本摘要（供设置页展示授权进度）。 */
+  @JavascriptInterface
+  fun shizukuStatus(): String {
+    return try {
+      if (ShizukuShellExecutor.isAvailable()) {
+        "{\"available\":true,\"version\":\"" + rikka.shizuku.Shizuku.getVersion() + "\"}"
+      } else {
+        "{\"available\":false}"
+      }
+    } catch (_: Exception) {
+      "{\"available\":false}"
+    }
+  }
+
+  /** 尝试打开 Shizuku 授权入口：已装 App 则跳转，未装则跳 Play/官网。 */
+  @JavascriptInterface
+  fun openShizukuSetup() {
+    onOpenShizukuSetup()
   }
 
   companion object {

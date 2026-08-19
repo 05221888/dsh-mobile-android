@@ -299,7 +299,10 @@ class MainActivity : ComponentActivity() {
     setContentView(root)
     configureWebView()
     // Testable update trigger: adb am start -n .../.MainActivity -a com.dshmobile.shell.action.UPDATE
-    if (intent?.action == ACTION_UPDATE) {
+    // Only debug builds accept this implicit action; a released APK must not
+    // let another app start an unsandboxed runtime download.
+    val debuggable = (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+    if (intent?.action == ACTION_UPDATE && debuggable) {
       runUpdate()
     } else {
       startEngineFlow()
@@ -314,7 +317,16 @@ class MainActivity : ComponentActivity() {
     // Back from the directory picker / Termux: re-route if the engine came up.
     // 仅当 WebView 未展示（引导页/首次启动）时才探测并重路由；相册/文件选择器
     // 返回时 WebView 已可见，探测超时会误触发 showWeb→reload，导致 JS 状态丢失。
-    if (webView.visibility != View.VISIBLE && !EngineProbe.check().optBoolean("running", false)) startEngineFlow()
+    // 后台线程探测：EngineProbe 是网络调用（默认 800ms 超时），在主线程做会
+    // 在防火墙/VPN 慢连接下导致 jank 甚至 ANR。
+    if (webView.visibility != View.VISIBLE) {
+      Thread {
+        val running = try { EngineProbe.check().optBoolean("running", false) } catch (_: Exception) { false }
+        runOnUiThread {
+          if (!running && webView.visibility != View.VISIBLE) startEngineFlow()
+        }
+      }.start()
+    }
     // 主题补推：从系统设置/SAF 返回时系统主题可能已变（兜底桥时序覆盖）。
     if (::webView.isInitialized) pushSystemDark(webView)
     // M3：从系统授权页返回——上次 pick 因缺权限挂起时，已授权则自动续启
@@ -461,8 +473,14 @@ class MainActivity : ComponentActivity() {
         if (isEngineSource(failingUrl)) showGuide()
       }
 
+      override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+        super.onPageStarted(view, url, favicon)
+        if (isEngineSource(url)) injectCompatPolyfills(view)
+      }
+
       override fun onPageFinished(view: WebView, url: String) {
         super.onPageFinished(view, url)
+        if (isEngineSource(url)) injectCompatPolyfills(view)
         pushSystemDark(view)
       }
     }
@@ -527,6 +545,7 @@ class MainActivity : ComponentActivity() {
           showTestNotification("界面已刷新", "Web UI 已重新加载")
         },
         onOpenConsole = { startActivity(Intent(this, ConsoleActivity::class.java)) },
+        onOpenShizukuSetup = { openShizukuSetup() },
         onGetDevLogEnabled = { DevLogPrefs.isEnabled(this) },
         onSetDevLogEnabled = { enabled ->
           DevLogPrefs.setEnabled(this, enabled)
@@ -890,6 +909,14 @@ class MainActivity : ComponentActivity() {
    * 引擎源判定：精确匹配本机引擎的 scheme/host/port（防前缀欺骗，
    * 如 127.0.0.1:30800 或 127.0.0.1:3080.evil.com 误判为引擎源）。
    */
+  private fun injectCompatPolyfills(view: WebView) {
+    try {
+      val js = assets.open("js/compat-polyfills.js").bufferedReader().use { it.readText() }
+      view.evaluateJavascript(js, null)
+    } catch (t: Throwable) {
+      Log.w(TAG, "compat polyfill inject failed", t)
+    }
+  }
   private fun isEngineSource(url: String): Boolean {
     return try {
       val base = Uri.parse(EngineProbe.ENGINE_URL)
@@ -1051,12 +1078,34 @@ class MainActivity : ComponentActivity() {
     guide.addView(logSummary)
     guide.addView(buttonRow(openConsole, retry))
     guide.addView(buttonRow(openTermux, update))
+    val shizukuRow = Button(this).apply {
+      text = "Shizuku 授权"
+      setOnClickListener { openShizukuSetup() }
+    }
+    guide.addView(buttonRow(shizukuRow))
     return guide
   }
 
   private fun launchTermux() {
     val intent = packageManager.getLaunchIntentForPackage("com.termux")
     if (intent != null) startActivity(intent)
+  }
+
+  /** Shizuku 授权入口：已安装则打开 Shizuku App，否则引导到官网下载。 */
+  private fun openShizukuSetup() {
+    val intent = packageManager.getLaunchIntentForPackage("moe.shizuku.privileged.api")
+    if (intent != null) {
+      startActivity(intent)
+      showTestNotification("Shizuku", "请在 Shizuku 中授权本应用")
+    } else {
+      val uri = Uri.parse("https://shizuku.rikka.app/zh-hans/download.html")
+      try {
+        startActivity(Intent(Intent.ACTION_VIEW, uri))
+        showTestNotification("下载 Shizuku", "安装后再次进入此设置完成授权")
+      } catch (_: Exception) {
+        showTestNotification("需要 Shizuku", "请先安装 Shizuku App 后授权")
+      }
+    }
   }
 
   /**
