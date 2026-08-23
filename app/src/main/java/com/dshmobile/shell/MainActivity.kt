@@ -300,6 +300,21 @@ class MainActivity : ComponentActivity() {
     root.addView(webView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     guideView = buildGuideView()
     root.addView(guideView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+    val density = resources.displayMetrics.density
+    val shizukuFab = Button(this).apply {
+      text = "设置"
+      textSize = 12f
+      setOnClickListener { startActivity(Intent(this@MainActivity, PhoneSettingsActivity::class.java)) }
+    }
+    val fabLp = FrameLayout.LayoutParams(
+      FrameLayout.LayoutParams.WRAP_CONTENT,
+      FrameLayout.LayoutParams.WRAP_CONTENT,
+    ).apply {
+      gravity = android.view.Gravity.BOTTOM or android.view.Gravity.END
+      rightMargin = (16 * density).toInt()
+      bottomMargin = (88 * density).toInt()
+    }
+    root.addView(shizukuFab, fabLp)
     setContentView(root)
     configureWebView()
     // Testable update trigger: adb am start -n .../.MainActivity -a com.dshmobile.shell.action.UPDATE
@@ -311,6 +326,7 @@ class MainActivity : ComponentActivity() {
     } else {
       startEngineFlow()
     }
+    ShizukuManager.ensureBridgeRunning(this)
   }
 
   override fun onResume() {
@@ -550,6 +566,8 @@ class MainActivity : ComponentActivity() {
         },
         onOpenConsole = { startActivity(Intent(this, ConsoleActivity::class.java)) },
         onOpenShizukuSetup = { openShizukuSetup() },
+        onOpenPluginManager = { startActivity(Intent(this, PluginManagerActivity::class.java)) },
+        onCheckAppUpdate = { startActivity(Intent(this, PhoneSettingsActivity::class.java)) },
         onGetDevLogEnabled = { DevLogPrefs.isEnabled(this) },
         onSetDevLogEnabled = { enabled ->
           DevLogPrefs.setEnabled(this, enabled)
@@ -1113,6 +1131,11 @@ class MainActivity : ComponentActivity() {
       }
     }
     guide.addView(buttonRow(shizukuRow, testBridgeBtn))
+    val pluginBtn = Button(this).apply {
+      text = "手机设置"
+      setOnClickListener { startActivity(Intent(this@MainActivity, PhoneSettingsActivity::class.java)) }
+    }
+    guide.addView(buttonRow(pluginBtn))
     return guide
   }
 
@@ -1121,21 +1144,33 @@ class MainActivity : ComponentActivity() {
     if (intent != null) startActivity(intent)
   }
 
-  /** Shizuku 授权入口：已安装则打开 Shizuku App，否则引导到官网下载。 */
+  /** Shizuku 授权入口：进独立教导页，主动弹授权，不再只跳到外部 App。 */
   private fun openShizukuSetup() {
-    val intent = packageManager.getLaunchIntentForPackage("moe.shizuku.privileged.api")
-    if (intent != null) {
-      startActivity(intent)
-      showTestNotification("Shizuku", "请在 Shizuku 中授权本应用")
-    } else {
-      val uri = Uri.parse("https://shizuku.rikka.app/zh-hans/download.html")
-      try {
-        startActivity(Intent(Intent.ACTION_VIEW, uri))
-        showTestNotification("下载 Shizuku", "安装后再次进入此设置完成授权")
-      } catch (_: Exception) {
-        showTestNotification("需要 Shizuku", "请先安装 Shizuku App 后授权")
-      }
+    startActivity(Intent(this, ShizukuSetupActivity::class.java))
+  }
+
+  private fun waitForEngine(seconds: Int): Boolean {
+    for (i in 0 until seconds) {
+      if (EngineProbe.check().optBoolean("running", false)) return true
+      Thread.sleep(1000)
     }
+    return false
+  }
+
+  /**
+   * 先按当前开关启动；超时则只留启动必需插件再启一次。
+   * 上次超时就是桌面插件（notify-sound / imagegen）在加载阶段崩了。
+   */
+  private fun waitForEngineOrFallback(): Boolean {
+    if (!engineManager.startEngine()) return false
+    runOnUiThread { engineStatus.text = "正在启动引擎…" }
+    if (waitForEngine(90)) return true
+    runOnUiThread { engineStatus.text = "插件拖垮了引擎，正在改用安全模式…" }
+    PluginCatalog.enableOnlyBootCritical(this)
+    try { engineManager.stopEngine() } catch (_: Exception) {}
+    EngineManager.lastStartAttemptAt = 0
+    if (!engineManager.startEngine()) return false
+    return waitForEngine(90)
   }
 
   /**
@@ -1188,29 +1223,18 @@ class MainActivity : ComponentActivity() {
           engineStatus.text = "正在启动引擎…"
         }
       }
-      if (!engineManager.startEngine()) {
+      if (!waitForEngineOrFallback()) {
         runOnUiThread {
-          engineStatus.text = "引擎启动失败，请重试。"
+          engineStatus.text = "引擎启动超时，请重试。"
           showGuide()
         }
         return@Thread
       }
-      // Poll up to 30s for the web service.
-      for (i in 0..30) {
-        if (EngineProbe.check().optBoolean("running", false)) {
-          startEngineService()
-          applyShizukuKeepAlive()
-          runOnUiThread {
-            markOnboarded()
-            showWeb()
-          }
-          return@Thread
-        }
-        Thread.sleep(1000)
-      }
+      startEngineService()
+      applyShizukuKeepAlive()
       runOnUiThread {
-        engineStatus.text = "引擎启动超时，请重试。"
-        showGuide()
+        markOnboarded()
+        showWeb()
       }
       } finally {
         engineFlowRunning.set(false)

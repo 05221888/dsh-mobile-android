@@ -1,0 +1,6 @@
+# dsh-memory-sync bundle layer: inserts the memory-sync plugin row.
+# Same row id on desktop (web profile) and mobile (dsh-mobile default plugins)
+# so both ends load the same tool surface.
+- insert:
+    - id: dsh-memory-sync
+      name: '@wushenghuang/dsh-memory-sync-hub'

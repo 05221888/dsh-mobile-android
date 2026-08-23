@@ -4,7 +4,6 @@ import android.content.pm.PackageManager
 import android.util.Log
 import java.io.ByteArrayOutputStream
 import java.lang.reflect.Method
-import java.util.concurrent.TimeUnit
 import rikka.shizuku.Shizuku
 
 /**
@@ -40,19 +39,33 @@ object ShizukuShellExecutor {
   @Volatile
   private var newProcessMethod: Method? = null
 
-  /** True when the Shizuku server binder is reachable and authorized. */
-  fun isAvailable(): Boolean {
+  fun binderReady(): Boolean {
+    return try { Shizuku.pingBinder() } catch (_: Throwable) { false }
+  }
+
+  fun hasPermission(): Boolean {
     return try {
-      Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+      Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
     } catch (_: Throwable) {
       false
     }
   }
 
-  /** 反射拿 Shizuku.newProcess(String[], String[], File) 回调。 */
+  /** True when the Shizuku server binder is reachable and authorized. */
+  fun isAvailable(): Boolean = binderReady() && hasPermission()
+
+  /**
+   * 官方 dsh-phone 实测签名：newProcess(String[], String[], String)。
+   * 我们之前写成 File 第三参，反射永远拿不到方法，点进去必然连不上。
+   */
   private fun newProcessMethod(): Method {
     newProcessMethod?.let { return it }
-    val m = Shizuku::class.java.getDeclaredMethod("newProcess", Array<String>::class.java, Array<String>::class.java, java.io.File::class.java)
+    val m = Shizuku::class.java.getDeclaredMethod(
+      "newProcess",
+      Array<String>::class.java,
+      Array<String>::class.java,
+      String::class.java,
+    )
     m.isAccessible = true
     newProcessMethod = m
     return m
@@ -70,9 +83,8 @@ object ShizukuShellExecutor {
     if (!isAvailable()) {
       throw IllegalStateException("Shizuku 未运行或未授权（需先在设置中授权）")
     }
-    val env = arrayOf("PATH=/system/bin:/system/xbin:/sbin:/vendor/bin")
     val process: Process = try {
-      newProcessMethod().invoke(null, cmd, env, null) as Process
+      newProcessMethod().invoke(null, cmd, null, null) as Process
     } catch (error: Throwable) {
       throw IllegalStateException("无法创建 Shizuku 特权进程: " + error.message, error)
     }
@@ -86,7 +98,12 @@ object ShizukuShellExecutor {
       .put("truncated", result.truncated)
   }
 
-  /** 并发排空 stdout/stderr（防管道写满阻塞死锁），等待退出并返回结果。 */
+  /**
+   * 官方 dsh-phone 实测：ShizukuRemoteProcess.waitFor/waitForTimeout 在部分 ROM
+   * 上永不返回；exitValue() 在进程未退出时抛 IllegalArgumentException
+   * （"process hasn't exited"），不是 IllegalThreadStateException。
+   * 所以这里轮询 exitValue，绝不调用 waitFor。
+   */
   private fun drain(process: Process, timeoutMs: Long, wantBinary: Boolean): ExecResult {
     val outBuf = ByteArrayOutputStream()
     val errBuf = ByteArrayOutputStream()
@@ -97,15 +114,28 @@ object ShizukuShellExecutor {
     val errThread = Thread { drainStream(process.errorStream, errBuf, MAX_TEXT_BYTES) }
     outThread.start()
     errThread.start()
-    val exited = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
-    if (!exited) {
-      process.destroy()
-      process.destroyForcibly()
+    val deadline = System.currentTimeMillis() + timeoutMs
+    var code = -1
+    var finished = false
+    while (System.currentTimeMillis() < deadline) {
+      try {
+        code = process.exitValue()
+        finished = true
+        break
+      } catch (_: IllegalThreadStateException) {
+        Thread.sleep(100)
+      } catch (e: IllegalArgumentException) {
+        if (e.message?.contains("hasn't exited") == true) Thread.sleep(100)
+        else throw e
+      }
+    }
+    if (!finished) {
+      try { process.destroy() } catch (_: Throwable) {}
+      try { process.destroyForcibly() } catch (_: Throwable) {}
       throw IllegalStateException("特权命令执行超时（${timeoutMs}ms）")
     }
     outThread.join(2_000)
     errThread.join(2_000)
-    val code = process.exitValue()
     return if (wantBinary) {
       ExecResult(
         exitCode = code,

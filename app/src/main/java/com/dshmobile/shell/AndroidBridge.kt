@@ -29,6 +29,8 @@ class AndroidBridge(
   private val onGetDevLogEnabled: () -> Boolean = { false },
   private val onSetDevLogEnabled: (Boolean) -> Unit = {},
   private val onOpenShizukuSetup: () -> Unit = {},
+  private val onOpenPluginManager: () -> Unit = {},
+  private val onCheckAppUpdate: () -> Unit = {},
 ) {
 
   @JavascriptInterface
@@ -152,6 +154,16 @@ class AndroidBridge(
   @JavascriptInterface
   fun openShizukuSetup() {
     onOpenShizukuSetup()
+  }
+
+  @JavascriptInterface
+  fun openPluginManager() {
+    onOpenPluginManager()
+  }
+
+  @JavascriptInterface
+  fun checkAppUpdate() {
+    onCheckAppUpdate()
   }
 
   companion object {

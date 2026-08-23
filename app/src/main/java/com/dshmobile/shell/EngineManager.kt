@@ -368,22 +368,64 @@ class EngineManager(private val context: Context, private val pickToken: String?
       File(home, "profiles/web/cordis.patch.yml"), "mcp-vision")
     applyAssetPatchAppend("patched/cordis-pwsh-fix.yml",
       File(home, "profiles/web/cordis.patch.yml"), "dsh-mobile-pwsh-fix")
-    // dsh-android-control 插件安装：把 28 个安卓工具插件打入快照的 profile
-    // node_modules，并追加 cordis insert。插件读取 HOME/.dsh-bridge-token
-    // 获取 Shizuku 桥接 token（由 ShizukuManager 生成）。
-    installAndroidControlPlugin(home)
-    // 追加 android-control 装载条目（与 shell-termux/ui-responsive 同款 insert）——
-    // 插件 id 名装载，DSH 从 profile web/node_modules 解析包。
-    applyAssetPatchAppend("patched/dsh-android-control/cordis.patch.yml",
-      File(home, "profiles/web/cordis.patch.yml"), "android-control")
-    // 桌面插件移植（幂等，仅装一次）：会话删除（@huanlin/dsh-plugin-session-delete，
-    // 只依赖 @deepseek-ai/dsh-tools，快照具备）。
-    // 判断不放/已移除：dsh-notify-sound（import "ws"，快照 profile 顶层无 ws
-    // symlink → 引擎加载崩溃）、dsh-model-failover（import "schemastery" 裸包，
-    // 快照只有 @deepseek-ai/schemastery → 同样崩溃）、dsh-rtk（Windows exe）、
-    // dsh-imagegen（体积大+需配置面板）、dsh-leisure-zone（桌面 UI）、
-    // dsh-compaction-instant（依赖版本兼容性待验证）。
-    installMobilePlugin("@huanlin/dsh-plugin-session-delete", "@huanlin/dsh-plugin-session-delete", home, true)
+    PluginCatalog.migrateDefaults(context)
+    ensureBareNodeDeps(home)
+    seedDesktopMemories()
+    seedLeisureBook()
+    for (plugin in PluginCatalog.list(context)) {
+      installMobilePlugin(plugin.assetDir, plugin.name, home, plugin.scoped)
+    }
+    PluginCatalog.applyToggles(context, home)
+  }
+
+  /** 桌面插件 import "ws"/"schemastery" 时，快照只把它们放在 @deepseek-ai/dsh/node_modules。 */
+  private fun ensureBareNodeDeps(home: File) {
+    val realRoot = File(usrDir, "lib/node_modules/@deepseek-ai/dsh/node_modules")
+    for (name in listOf("ws", "schemastery")) {
+      val real = File(realRoot, name)
+      if (!real.exists()) continue
+      for (base in listOf(File(home, "profiles/web/node_modules"), File(home, "profiles/node_modules"))) {
+        val link = File(base, name)
+        if (link.exists()) continue
+        base.mkdirs()
+        try {
+          Files.createSymbolicLink(link.toPath(), real.toPath())
+        } catch (_: Exception) {
+          try { real.copyRecursively(link, overwrite = false) } catch (_: Exception) {}
+        }
+      }
+    }
+  }
+
+  /** 首次启动把电脑记忆种进手机 HOME/.dsh/memories（已有文件不覆盖）。 */
+  private fun seedDesktopMemories() {
+    val dest = File(homeDir, ".dsh/memories")
+    if (File(dest, "MEMORY.md").exists()) return
+    try {
+      dest.mkdirs()
+      copyAssetTree("seed-memories", dest)
+      Log.i(TAG, "seeded desktop memories -> " + dest.absolutePath)
+    } catch (e: Exception) {
+      Log.e(TAG, "seed memories failed", e)
+    }
+  }
+
+  /** 把内置教材拷到 HOME，供休闲区读取（幂等：已有文件不覆盖）。 */
+  private fun seedLeisureBook() {
+    val books = listOf("ckj.json", "math2-calculus.json")
+    for (name in books) {
+      val dest = File(homeDir, "leisure-books/$name")
+      if (dest.exists() && dest.length() > 0) continue
+      try {
+        dest.parentFile?.mkdirs()
+        context.assets.open("patched/leisure-books/$name").use { input ->
+          dest.outputStream().use { out -> input.copyTo(out) }
+        }
+        Log.i(TAG, "seeded leisure book -> " + dest.absolutePath)
+      } catch (e: Exception) {
+        Log.e(TAG, "seed leisure book failed: $name", e)
+      }
+    }
   }
 
   /**
@@ -465,17 +507,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
         topTarget.mkdirs()
         copyAssetTree("patched/$assetDir", topTarget)
       }
-      // cordis insert 装载条目（YAML 要求 @ 等特殊字符加引号）。
-      // id 与 name 相同，DSH loader 用 name 解析模块，client 端注册 id 也需一致
-      // （如 @huanlin/dsh-plugin-session-delete 的 client.js 注册 id 与之相同）。
-      val patchLine = "- insert:\n" +
-        "    - id: '" + pkgName + "'\n" +
-        "      name: '" + pkgName + "'\n"
-      val patchFile = File(home, "profiles/web/cordis.patch.yml")
-      if (patchFile.exists() && patchFile.readText().contains(pkgName)) return
-      val sep = if (patchFile.exists() && patchFile.readText().isNotBlank()) "\n" else ""
-      patchFile.appendText(sep + patchLine.trimEnd() + "\n")
-      Log.i(TAG, "desktop plugin installed: $pkgName -> " + target.absolutePath)
+      // 是否写入 cordis 由 PluginCatalog.applyToggles 按开关决定。
+      Log.i(TAG, "desktop plugin files ready: $pkgName -> " + target.absolutePath)
     } catch (e: Exception) {
       Log.e(TAG, "install desktop plugin $pkgName failed", e)
     }
@@ -643,6 +676,11 @@ class EngineManager(private val context: Context, private val pickToken: String?
       // 和 token 文件路径；插件本身通过 process.env.HOME + '/.dsh-bridge-token'
       // 读取 token，引擎 HOME 已指向 homeDir）。
       "DSH_BRIDGE_PORT" to ShizukuBridgeServer.BRIDGE_PORT.toString(),
+      // 让桌面插件能 import "ws" / "schemastery"（它们只在 dsh 内部 node_modules）。
+      "NODE_PATH" to File(usrDir, "lib/node_modules/@deepseek-ai/dsh/node_modules").absolutePath,
+      "DSH_LEISURE_BOOK_CKJ" to File(homeDir, "leisure-books/ckj.json").absolutePath,
+      // 考研数学二高数公式教材（休闲区书库第二本，2026-08-22）。
+      "DSH_LEISURE_BOOK_MATH2" to File(homeDir, "leisure-books/math2-calculus.json").absolutePath,
     ) + ShizukuManager.envInject()
   }
 

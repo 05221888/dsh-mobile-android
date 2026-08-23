@@ -1,0 +1,874 @@
+{
+  "version": 1,
+  "entries": {
+    "70e822889df811de": {
+      "trust": 0.5,
+      "retrievalCount": 7,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "updatedAt": "2026-08-19T02:52:31.366Z"
+    },
+    "5ea30ebd27e0d652": {
+      "trust": 0.6000000000000001,
+      "retrievalCount": 11,
+      "helpfulCount": 2,
+      "unhelpfulCount": 0,
+      "updatedAt": "2026-08-19T02:52:31.346Z"
+    },
+    "8374fe4f8e475e55": {
+      "trust": 0.5,
+      "retrievalCount": 10,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "updatedAt": "2026-08-19T02:52:31.368Z"
+    },
+    "52a10048922ffe60": {
+      "trust": 0.5,
+      "retrievalCount": 6,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "不对/不是这样的/上次记错了",
+        "以下旧记录已失效",
+        "这与哪些实体相关",
+        "实体",
+        "五五的项目",
+        "五五",
+        "项目",
+        "最喜欢吃辣",
+        "不能吃辣",
+        "我喜欢/用/想要",
+        "决定/选择了",
+        "我设了/配置了"
+      ],
+      "updatedAt": "2026-08-19T02:52:31.361Z"
+    },
+    "458569ef84a80c34": {
+      "trust": 0.5,
+      "retrievalCount": 5,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "关于某实体的全部事实",
+        "与该实体结构相关的其他事实",
+        "peppi",
+        "backend",
+        "built-in 记忆 → 结构化事实库",
+        "已存储 N 条事实 + 用 fact_store 搜索/probe/reason + 用 fact_feedback 评分",
+        "主动添加用户会期望你记住的事实",
+        "database is locked",
+        "Use when ...",
+        "伞形",
+        "按实体查全部关联",
+        "提示模型先检索",
+        "/their/history",
+        "/probe/reason",
+        "/like/love/use/want/need",
+        "/needs/requires",
+        "\\n---\\n",
+        "/\n-",
+        "/related/reason",
+        "/filter",
+        "/trust_delta",
+        "/unhelpful",
+        "Hermes Agent CN Desktop",
+        "Common Pitfalls",
+        "Verification Checklist"
+      ],
+      "updatedAt": "2026-08-19T02:52:31.365Z"
+    },
+    "a10bad47f0559c92": {
+      "trust": 0.5,
+      "retrievalCount": 5,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "用户消息里有明确偏好/决策时，用 memory action=extract 自动提取",
+        "复杂任务完成时用 skill_manage 创建/更新技能",
+        "/HRR/",
+        "Tab UI",
+        "LLM API"
+      ],
+      "updatedAt": "2026-08-19T02:52:31.352Z"
+    },
+    "0f5f91923cd0d702": {
+      "trust": 0.5,
+      "retrievalCount": 5,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "实时预取（基于当前问题）",
+        "我喜欢/用/想要",
+        "我们决定/选择了/项目使用",
+        "Hermes 记忆系统",
+        "/event",
+        "/disposed",
+        "DSH LLM"
+      ],
+      "updatedAt": "2026-08-19T02:52:31.357Z"
+    },
+    "e4da8090957e17fe": {
+      "trust": 0.5,
+      "retrievalCount": 5,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "DSH Web"
+      ],
+      "updatedAt": "2026-08-19T02:52:31.359Z"
+    },
+    "4eccc136eb9e5190": {
+      "trust": 0.5,
+      "retrievalCount": 2,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "同不同意/行不行"
+      ],
+      "updatedAt": "2026-08-17T13:02:15.809Z"
+    },
+    "bde5526e780522ee": {
+      "trust": 0.5,
+      "retrievalCount": 2,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-17T13:02:15.814Z"
+    },
+    "ae98cbe7d0b56fcf": {
+      "trust": 0.5,
+      "retrievalCount": 2,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "VS Code"
+      ],
+      "updatedAt": "2026-08-17T13:02:15.817Z"
+    },
+    "2c66cf15e5ddd232": {
+      "trust": 0.5,
+      "retrievalCount": 4,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "~/.agents/skills"
+      ],
+      "updatedAt": "2026-08-19T02:52:31.355Z"
+    },
+    "8a8af028bbae08f7": {
+      "trust": 0.5,
+      "retrievalCount": 4,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-19T02:52:31.351Z"
+    },
+    "2b0e60dd91daafd6": {
+      "trust": 0.5,
+      "retrievalCount": 4,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-17T13:29:07.644Z"
+    },
+    "1db5301491936e6e": {
+      "trust": 0.5,
+      "retrievalCount": 4,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/dsh-plugin-session-delete",
+        "C:\\Users\\",
+        "\\Desktop\\",
+        "\\dsh-plugin-session-delete",
+        "~/.dsh/sessions"
+      ],
+      "updatedAt": "2026-08-17T13:29:07.648Z"
+    },
+    "bda0081f090ccfb7": {
+      "trust": 0.5,
+      "retrievalCount": 4,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "C:\\Users\\",
+        "\\Desktop\\",
+        "\\dsh-model-failover",
+        "/dsh-model-failover",
+        "/request-error",
+        "/deepseek-v4-pro",
+        "/z-ai/glm-5.2"
+      ],
+      "updatedAt": "2026-08-17T13:29:07.647Z"
+    },
+    "981ca71a1f524642": {
+      "trust": 0.5,
+      "retrievalCount": 2,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-17T13:02:15.759Z"
+    },
+    "93d497a72c6df213": {
+      "trust": 0.5,
+      "retrievalCount": 4,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-17T13:29:07.643Z"
+    },
+    "2ff02eb08c195d45": {
+      "trust": 0.5,
+      "retrievalCount": 3,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "~/.dsh/sessions"
+      ],
+      "updatedAt": "2026-08-19T02:52:31.348Z"
+    },
+    "e51518cde14c90cb": {
+      "trust": 0.5,
+      "retrievalCount": 3,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-19T02:52:31.345Z"
+    },
+    "5dd77a2935002d62": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-17T13:02:15.807Z"
+    },
+    "b0063d5fecb15fd9": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-17T13:02:15.811Z"
+    },
+    "569d19afcd2c346c": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-17T13:02:15.812Z"
+    },
+    "3c5404939b874a00": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-17T13:02:15.815Z"
+    },
+    "ac569f2ee9ade7e2": {
+      "trust": 0.5,
+      "retrievalCount": 2,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/request-error",
+        "/request",
+        "/RATE_LIMIT",
+        "/INVALID_CREDENTIAL"
+      ],
+      "updatedAt": "2026-08-17T15:14:03.017Z"
+    },
+    "2b4fdd831fde832f": {
+      "trust": 0.5,
+      "retrievalCount": 2,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/store.py",
+        "/__init__.py",
+        "/hermes-agent-skill-authoring/SKILL.md\n-",
+        "/related/reason/contradict/update",
+        "/related/reason"
+      ],
+      "updatedAt": "2026-08-17T15:14:03.021Z"
+    },
+    "2ec16fc566771ef7": {
+      "trust": 0.5,
+      "retrievalCount": 2,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-17T15:14:03.014Z"
+    },
+    "f223e49039ca6360": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/dsh-plugin-session-delete"
+      ],
+      "updatedAt": "2026-08-17T13:02:16.192Z"
+    },
+    "cb12fc59beaf6fd7": {
+      "trust": 0.5,
+      "retrievalCount": 3,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/GitHub"
+      ],
+      "updatedAt": "2026-08-19T15:53:59.563Z"
+    },
+    "8faffdfbde46f3b7": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/dsh/node_modules/",
+        "/dsh-client-ui-settings-models/lib/client.js",
+        "/plugins/",
+        "/client.js",
+        "DSH GUI"
+      ],
+      "updatedAt": "2026-08-17T13:02:16.194Z"
+    },
+    "8e674c946c30c139": {
+      "trust": 0.5,
+      "retrievalCount": 3,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/GitHub"
+      ],
+      "updatedAt": "2026-08-19T15:53:59.562Z"
+    },
+    "67aaa8795d747a7c": {
+      "trust": 0.5,
+      "retrievalCount": 2,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "没用，闪退了",
+        "/Windows"
+      ],
+      "updatedAt": "2026-08-17T15:14:03.039Z"
+    },
+    "af5927165a108bb8": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-17T13:02:16.199Z"
+    },
+    "c39cc08300823a14": {
+      "trust": 0.5,
+      "retrievalCount": 2,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-17T15:14:03.034Z"
+    },
+    "4bee9b1e8fce15ca": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-17T13:02:16.203Z"
+    },
+    "f0a6372b411f6cd5": {
+      "trust": 0.5,
+      "retrievalCount": 2,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "Workspace API"
+      ],
+      "updatedAt": "2026-08-17T15:14:03.026Z"
+    },
+    "9e862c367852197f": {
+      "trust": 0.5,
+      "retrievalCount": 2,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/package.json"
+      ],
+      "updatedAt": "2026-08-17T15:14:03.024Z"
+    },
+    "2b547c3f795df681": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/pkg-26"
+      ],
+      "updatedAt": "2026-08-17T13:02:16.208Z"
+    },
+    "782dc82a5894b8c0": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/shortplay/online/probe",
+        "DSH Web"
+      ],
+      "updatedAt": "2026-08-17T13:02:16.210Z"
+    },
+    "371bf441e9c15fc8": {
+      "trust": 0.5,
+      "retrievalCount": 2,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/dsh-model-failover",
+        "C:\\Users\\",
+        "\\Desktop\\",
+        "\\dsh-model-failover",
+        "/model-failover/api/",
+        "/storages/model-failover/config.json",
+        "/deepseek-v4-pro",
+        "/z-ai/glm-5.2"
+      ],
+      "updatedAt": "2026-08-19T15:53:59.575Z"
+    },
+    "cee34d76ab7e566d": {
+      "trust": 0.5,
+      "retrievalCount": 2,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-17T15:14:03.043Z"
+    },
+    "0313f5bbecc21043": {
+      "trust": 0.5,
+      "retrievalCount": 2,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/60"
+      ],
+      "updatedAt": "2026-08-17T15:14:03.048Z"
+    },
+    "e056c5a8271fcdbc": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/add/remove/getFile",
+        "/pre",
+        "JSON RPC"
+      ],
+      "updatedAt": "2026-08-17T13:02:16.218Z"
+    },
+    "ac665b075bf43f07": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-17T13:02:16.220Z"
+    },
+    "cb1311db087f8038": {
+      "trust": 0.5,
+      "retrievalCount": 2,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/profile"
+      ],
+      "updatedAt": "2026-08-17T13:29:07.645Z"
+    },
+    "559a49b0f16535e4": {
+      "trust": 0.55,
+      "retrievalCount": 1,
+      "helpfulCount": 1,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/CodeGraph"
+      ],
+      "updatedAt": "2026-08-17T13:29:07.898Z"
+    },
+    "be80aa0b35f19ed7": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-17T15:14:03.019Z"
+    },
+    "e95187f0101b0bea": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "~/.dsh/profiles/web/leisure-zone.mjs"
+      ],
+      "updatedAt": "2026-08-17T15:14:03.029Z"
+    },
+    "02f987f2b5e9709b": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "他们能做到，你也可以",
+        "~/.dsh/profiles/web/cordis.patch.yml"
+      ],
+      "updatedAt": "2026-08-17T15:14:03.031Z"
+    },
+    "ac5f1ed1f43d012b": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-17T15:14:03.033Z"
+    },
+    "5ad8af77775d15c8": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/PATH/"
+      ],
+      "updatedAt": "2026-08-17T15:14:03.037Z"
+    },
+    "8479903895f37cee": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-17T15:14:03.044Z"
+    },
+    "726d381a7eb6afce": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-17T15:14:03.046Z"
+    },
+    "5e6e3d51833832c3": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/2026-08-15_APK-shortplay-deep-analysis-report.md"
+      ],
+      "updatedAt": "2026-08-17T15:14:03.049Z"
+    },
+    "7f89b2fc80daef55": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/superpowers/specs/2026-08-15-leisure-shortplay-replica-design.md"
+      ],
+      "updatedAt": "2026-08-17T15:14:03.051Z"
+    },
+    "e38450fd0e6c0c8d": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/gpt-image-2",
+        "/images/generations"
+      ],
+      "updatedAt": "2026-08-19T02:52:31.350Z"
+    },
+    "8c48ac8c278a0369": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "PowerShell worker 超时"
+      ],
+      "updatedAt": "2026-08-19T02:52:31.363Z"
+    },
+    "c25f4de53f1df95d": {
+      "trust": 0.5,
+      "retrievalCount": 2,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-19T15:54:21.102Z"
+    },
+    "fec95bc7fc357751": {
+      "trust": 0.5,
+      "retrievalCount": 2,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "生图好像还是不行",
+        "/images/generations",
+        "API Key"
+      ],
+      "updatedAt": "2026-08-19T15:54:21.104Z"
+    },
+    "088182c3fac9ac61": {
+      "trust": 0.5,
+      "retrievalCount": 2,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-19T15:54:21.105Z"
+    },
+    "6f2d65484d364c06": {
+      "trust": 0.5,
+      "retrievalCount": 2,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/master/manifest.json"
+      ],
+      "updatedAt": "2026-08-19T15:54:21.107Z"
+    },
+    "8f5e281e2f1afcdf": {
+      "trust": 0.5,
+      "retrievalCount": 2,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "C:\\Users\\",
+        "\\Desktop\\",
+        "\\aitool_site_final\\index.html"
+      ],
+      "updatedAt": "2026-08-19T15:54:21.109Z"
+    },
+    "ac62527575ffaa36": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/dsh-mobile-releases"
+      ],
+      "updatedAt": "2026-08-19T15:53:54.045Z"
+    },
+    "050c01f7163f0177": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/chat/completions",
+        "/gpt-image-2",
+        "/images/generations"
+      ],
+      "updatedAt": "2026-08-19T15:53:54.047Z"
+    },
+    "53ea3c737e7d8e91": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-19T15:53:54.050Z"
+    },
+    "c5ca2ec6e56f176f": {
+      "trust": 0.5,
+      "retrievalCount": 2,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-19T15:53:59.573Z"
+    },
+    "104347d2c0824c0d": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "生图好像还是不行",
+        "/v1",
+        "/api/"
+      ],
+      "updatedAt": "2026-08-19T15:53:54.305Z"
+    },
+    "ac14750bb390e5c4": {
+      "trust": 0.5,
+      "retrievalCount": 2,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-19T15:53:59.570Z"
+    },
+    "151c893e628b0a10": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "//gitee.com/wushenghuang/dsh-mobile-releases/raw/master/manifest.json",
+        "/size",
+        "Gitee API"
+      ],
+      "updatedAt": "2026-08-19T15:53:54.308Z"
+    },
+    "adfa15888c84a8d1": {
+      "trust": 0.5,
+      "retrievalCount": 2,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "//aitool-6hw.pages.dev",
+        "C:\\Users\\",
+        "\\Desktop\\",
+        "\\aitool_site_final\\index.html"
+      ],
+      "updatedAt": "2026-08-19T15:54:03.654Z"
+    },
+    "6d89ede571c56f57": {
+      "trust": 0.5,
+      "retrievalCount": 2,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "//gitee.com/wushenghuang/dsh-mobile-releases/releases/download/v0.12.0/manifest.j",
+        "Gitee API"
+      ],
+      "updatedAt": "2026-08-19T15:54:03.652Z"
+    },
+    "cff6a49ca380525e": {
+      "trust": 0.5,
+      "retrievalCount": 3,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "C:\\Users\\",
+        "\\Desktop\\",
+        "\\aitool_site_final\\index.html"
+      ],
+      "updatedAt": "2026-08-19T15:54:03.659Z"
+    },
+    "d3ae2d6c8ba1b5ce": {
+      "trust": 0.5,
+      "retrievalCount": 2,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-19T15:54:03.657Z"
+    },
+    "6d0756ef0e9fb841": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "GitHub API"
+      ],
+      "updatedAt": "2026-08-19T15:53:59.560Z"
+    },
+    "21b726e0b9f14bd6": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/node_modules/",
+        "/dsh-workspace/lib/index.js",
+        "~/.dsh/WORKSPACE-DRIVE-PATCH.md",
+        "/web",
+        "/web/node_modules",
+        "Boot Camp Mac"
+      ],
+      "updatedAt": "2026-08-19T15:53:59.565Z"
+    },
+    "3154af0444394b02": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/todo.js",
+        "/20"
+      ],
+      "updatedAt": "2026-08-19T15:53:59.572Z"
+    },
+    "4b1074efbd2f3398": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-19T15:53:59.577Z"
+    },
+    "7db99d2cd058cb07": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/INSTALL.md",
+        "/FAQ/"
+      ],
+      "updatedAt": "2026-08-19T15:54:03.649Z"
+    },
+    "115a6175c60d4489": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-19T15:54:03.651Z"
+    },
+    "721acb2b2e6ccf8f": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [],
+      "updatedAt": "2026-08-19T15:54:03.653Z"
+    },
+    "65297092dea1ebbc": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "D:\\Desktop"
+      ],
+      "updatedAt": "2026-08-19T15:54:03.656Z"
+    },
+    "cc62852427f518c6": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/save/remove"
+      ],
+      "updatedAt": "2026-08-19T15:54:03.661Z"
+    },
+    "fb4bf006c7e8016a": {
+      "trust": 0.5,
+      "retrievalCount": 1,
+      "helpfulCount": 0,
+      "unhelpfulCount": 0,
+      "entities": [
+        "/dsh-automation",
+        "/Web",
+        "~/.dsh/skills/last30days-cn",
+        "~/.dsh/skills/pdf",
+        "DSH Web"
+      ],
+      "updatedAt": "2026-08-19T15:54:03.663Z"
+    }
+  }
+}

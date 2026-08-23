@@ -25,6 +25,42 @@ class UpdateManager(private val context: Context) {
    * Run the update flow on a background thread.
    * @param onStatus progress text callback (any thread).
    */
+  fun checkApkUpdate(): ApkUpdate? {
+    val raw = fetch(APK_MANIFEST_URL)
+    val json = JSONObject(raw)
+    val remoteCode = json.optInt("versionCode", 0)
+    val localCode = context.packageManager.getPackageInfo(context.packageName, 0).longVersionCode.toInt()
+    if (remoteCode <= localCode) return null
+    return ApkUpdate(
+      versionName = json.optString("versionName", remoteCode.toString()),
+      versionCode = remoteCode,
+      url = json.getString("url"),
+      sha256 = json.optString("sha256", ""),
+      notes = json.optString("notes", ""),
+    )
+  }
+
+  fun downloadApk(update: ApkUpdate, dest: File, onStatus: (String) -> Unit) {
+    requireHttps(update.url, "apk")
+    onStatus("下载 APK " + update.versionName + "…")
+    download(update.url, dest)
+    if (update.sha256.isNotEmpty()) {
+      val actual = sha256(dest)
+      if (!actual.equals(update.sha256, ignoreCase = true)) {
+        dest.delete()
+        throw IllegalStateException("APK SHA256 不匹配")
+      }
+    }
+  }
+
+  data class ApkUpdate(
+    val versionName: String,
+    val versionCode: Int,
+    val url: String,
+    val sha256: String,
+    val notes: String,
+  )
+
   fun checkAndApply(onStatus: (String) -> Unit) {
     Thread {
       val tmp = File(context.filesDir, "update.tar.xz")
@@ -209,6 +245,7 @@ class UpdateManager(private val context: Context) {
   companion object {
     /** Emulator reaches the host loopback alias; production overrides via manifestUrl. */
     const val DEFAULT_MANIFEST_URL = "https://gitee.com/wushenghuang/dsh-mobile-releases/raw/master/manifest.json"
+    const val APK_MANIFEST_URL = "https://gitee.com/wushenghuang/dsh-mobile-releases/raw/master/apk-manifest.json"
     const val MAX_SNAPSHOT_BYTES = 500L * 1024 * 1024
     /** manifest 体积上限（64KB，防恶意/异常大 manifest OOM）。 */
     const val MAX_MANIFEST_BYTES = 64L * 1024

@@ -1,0 +1,22 @@
+{
+  "reviewEnabled": true,
+  "reviewInterval": 10,
+  "skillReviewEnabled": false,
+  "perTurnProjectWrites": true,
+  "perTurnDailyWrites": true,
+  "perTurnKeyWrites": true,
+  "searchDocsEnabled": false,
+  "searchDocsMode": null,
+  "coiEnabled": false,
+  "broadcastEnabled": false,
+  "advisorEnabled": false,
+  "sessionSearchEnabled": false,
+  "sessionEnabled": false,
+  "promptsEnabled": false,
+  "modelsEnabled": false,
+  "uiSettingsEnabled": false,
+  "bookmarkEnabled": false,
+  "notifyEnabled": false,
+  "syncEnabled": false,
+  "canvasEnabled": false
+}

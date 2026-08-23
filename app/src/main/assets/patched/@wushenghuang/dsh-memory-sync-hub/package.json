@@ -1,0 +1,29 @@
+{
+    "name":  "@wushenghuang/dsh-memory-sync-hub",
+    "version":  "0.1.0",
+    "description":  "Cross-device DSH memory sync via Gitee private repo as relay: two-way merge of ~/.dsh/memories between desktop PC and mobile APK, plus installed-plugin manifest exchange. Pure Node builtins, zero npm deps, no git binary needed.",
+    "type":  "module",
+    "main":  "lib/index.js",
+    "exports":  {
+                    ".":  "./lib/index.js",
+                    "./merge":  "./lib/merge.js",
+                    "./package.json":  "./package.json"
+                },
+    "files":  [
+                  "lib",
+                  "scripts",
+                  "tests",
+                  "README.md",
+                  "LICENSE",
+                  "cordis.patch.yml"
+              ],
+    "license":  "MIT",
+    "keywords":  [
+                     "dsh",
+                     "deepseek-harness",
+                     "memory",
+                     "sync",
+                     "gitee",
+                     "mobile"
+                 ]
+}
