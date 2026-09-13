@@ -24,7 +24,8 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import { createGitee, GiteeError } from './gitee.js?cachebust=4';
 import { isEntryStyle, unionMerge } from './merge.js?cachebust=2';
 import { collectSyncFiles, isExcludedRel, scanProfiles } from './manifest.js?cachebust=3';
-import { inboxPath, parseJsonl, appendMessage, ackMessage, makeMessage, formatInbox } from './mailbox.js?cachebust=1';
+import { inboxPath, parseJsonl, appendMessage, ackMessage, makeMessage, formatInbox } from './mailbox.js?cachebust=3';
+import { startPeerPoll, pollStatePath, pendingMailPath, readJsonFile } from './poll.js?cachebust=2';
 
 const name = 'dsh-memory-sync';
 const inject = ['tools'];
@@ -125,6 +126,57 @@ async function buildStatus(gitee) {
 }
 
 function apply(ctx) {
+  let poller = { tick: async () => ({ action: 'skip', reason: 'poll-not-started' }), intervalMs: 180000 };
+  try {
+    poller = startPeerPoll(ctx, { readConfig, createGitee, dshHome });
+  } catch (e) {
+    console.warn('[dsh-memory-sync] peer poll not started:', e instanceof Error ? e.message : e);
+  }
+
+  ctx.tools.register(defineTool({
+    name: 'peer_poll_now',
+    description: 'Immediately poll this device Gitee mailbox. Empty inbox does not start a model turn. Task mail (ask/lesson/task or chat with [task]) wakes the dedicated peer session.',
+    parameters: {},
+    output: { schema: { type: 'string' }, render(_a, v) { return [{ type: 'text', text: v }]; } },
+    async execute() {
+      try {
+        const r = await poller.tick({ force: true });
+        return [
+          `action=${r.action} reason=${r.reason || ''}`,
+          r.count ? `count=${r.count}` : '',
+          r.sessionId ? `session=${r.sessionId} mode=${r.mode || ''}` : '',
+          r.preview || '',
+        ].filter(Boolean).join('\n');
+      } catch (e) {
+        return `peer_poll_now failed: ${e.message}`;
+      }
+    },
+  }));
+
+  ctx.tools.register(defineTool({
+    name: 'peer_poll_status',
+    description: 'Show peer-mailbox poll daemon state: last SHA, unread, next poll time, dedicated session id. Does not call the model.',
+    parameters: {},
+    output: { schema: { type: 'string' }, render(_a, v) { return [{ type: 'text', text: v }]; } },
+    async execute() {
+      try {
+        const cfg = readConfig();
+        const st = readJsonFile(pollStatePath(dshHome()), {});
+        const pending = readJsonFile(pendingMailPath(dshHome()), null);
+        return [
+          `device=${cfg.device} intervalMs=${poller.intervalMs} poll.enabled=${cfg.poll?.enabled !== false}`,
+          `lastAction=${st.lastAction || '-'} reason=${st.lastReason || '-'}`,
+          `unread=${st.unread ?? '-'} dispatchable=${st.dispatchable ?? '-'} lastSha=${(st.lastSha || '').slice(0, 10)}`,
+          `sessionId=${st.sessionId || '(none yet)'} lastPollAt=${st.lastPollAt ? new Date(st.lastPollAt).toISOString() : '-'}`,
+          `nextAt=${st.nextAt ? new Date(st.nextAt).toISOString() : '-'} fails=${st.consecutiveFails || 0}`,
+          pending ? `PENDING FILE: ${pending.count} mail at ${pending.at} (${pending.error || ''})` : 'pending-file: none',
+        ].join('\n');
+      } catch (e) {
+        return `peer_poll_status failed: ${e.message}`;
+      }
+    },
+  }));
+
   ctx.tools.register(defineTool({
     name: 'memory_sync_status',
     description: 'Compare local DSH memories (~/.dsh/memories) with the shared Gitee hub repo: lists files only-local, only-remote, and differing. Read-only.',
@@ -327,7 +379,7 @@ function apply(ctx) {
 
   ctx.tools.register(defineTool({
     name: 'peer_send',
-    description: 'Send a message to the other DSH device via the Gitee mailbox (desktop↔phone). Use kind=lesson to teach the other side how to use a plugin it does not have. Default recipient is phone if this device is desktop-pc, else desktop-pc.',
+    description: 'Send a message to the other DSH device via the Gitee mailbox (desktop↔phone). kind=ask/lesson/task 会由对端轮询自动叫醒会话；纯 chat 问候不会。若 chat 也要自动处理，subject 写成 [task] 开头。Default recipient is phone if this device is desktop-pc, else desktop-pc.',
     parameters: {
       to: { type: 'string', description: 'Recipient device id (default: the other side).' },
       kind: { type: 'string', description: 'chat | lesson | ask (default chat).' },

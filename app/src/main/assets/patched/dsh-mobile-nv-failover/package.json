@@ -1,0 +1,31 @@
+{
+  "name": "dsh-mobile-nv-failover",
+  "version": "0.1.0",
+  "description": "Mobile-side LLM key-pool failover for NVIDIA NIM (integrate.api.nvidia.com/v1). Reads up to 24 nvapi- keys from a device-local file, round-robins per request, and serves as a chat-completions proxy that swaps keys on 401/403/429/5xx. Settings page lets the user paste keys (one per line) without ever shipping them in the APK.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "README.md",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "runtime": "host",
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "mobile",
+    "nv-failover",
+    "nvidia-nim",
+    "nvapi"
+  ]
+}

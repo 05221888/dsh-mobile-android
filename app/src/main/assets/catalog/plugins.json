@@ -58,11 +58,11 @@
     "id": "imagegen",
     "name": "@dickpy/dsh-imagegen",
     "title": "AI 生图",
-    "desc": "侧栏「AI 生图」，面板在工作区上方显示（已含 centerCol 挂载修复；schemastery 已随包内置）。",
+    "desc": "侧栏「AI 生图」，面板在工作区上方显示（已含 centerCol 挂载修复；schemastery 随包内置 + 引擎侧裸依赖兜底）。勾掉后引擎启动更快；它是重插件，启动超时时会被安全模式自动关掉。",
     "assetDir": "@dickpy/dsh-imagegen",
     "scoped": true,
     "defaultEnabled": true,
-    "safe": true,
+    "safe": false,
     "bootCritical": false
   },
   {
@@ -96,6 +96,17 @@
     "scoped": false,
     "defaultEnabled": false,
     "safe": false,
+    "bootCritical": false
+  },
+  {
+    "id": "dsh-mobile-nv-failover",
+    "name": "dsh-mobile-nv-failover",
+    "title": "NV Failover",
+    "desc": "手机本地 NVIDIA NIM key 池轮换（OpenAI 兼容 integrate.api.nvidia.com/v1）。首次启用：设置 → NV Failover 粘贴 nvapi- 密钥（每行一个，APK 不含任何密钥）。启用后对话自动走轮换，单个 key 失败/限流自动切下一个；统计：总请求/成功/每 key 失败次数/最近错误。",
+    "assetDir": "dsh-mobile-nv-failover",
+    "scoped": false,
+    "defaultEnabled": false,
+    "safe": true,
     "bootCritical": false
   }
 ]

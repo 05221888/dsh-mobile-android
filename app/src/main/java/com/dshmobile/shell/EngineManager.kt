@@ -378,20 +378,43 @@ class EngineManager(private val context: Context, private val pickToken: String?
     PluginCatalog.applyToggles(context, home)
   }
 
-  /** 桌面插件 import "ws"/"schemastery" 时，快照只把它们放在 @deepseek-ai/dsh/node_modules。 */
+  /**
+   * 补齐桌面插件裸 import 的依赖（如 imagegen 的 `import z from "schemastery"`）。
+   *
+   * 快照里只有作用域版 @deepseek-ai/schemastery（挂在 dsh 自己的 node_modules 下），
+   * 没有顶层同名包；App 私有域允许 symlink，所以在这里补出
+   *   <profiles[/web]>/node_modules/<裸名> -> usr/lib/node_modules/@deepseek-ai/dsh/node_modules/<候选>
+   * 作为兜底。v0.15.x 事故：imagegen 升到 1.5.1 时随包 node_modules 丢失，
+   * 全靠这里兜底才能解析；symlink 建不出来时退回整目录拷贝。
+   */
   private fun ensureBareNodeDeps(home: File) {
     val realRoot = File(usrDir, "lib/node_modules/@deepseek-ai/dsh/node_modules")
-    for (name in listOf("ws", "schemastery")) {
-      val real = File(realRoot, name)
-      if (!real.exists()) continue
-      for (base in listOf(File(home, "profiles/web/node_modules"), File(home, "profiles/node_modules"))) {
-        val link = File(base, name)
+    // 裸名 -> 快照内候选（按顺序取第一个存在的）
+    val aliases = linkedMapOf(
+      "schemastery" to listOf("schemastery", "@deepseek-ai/schemastery"),
+      "ws" to listOf("ws"),
+    )
+    val bases = listOf(File(home, "profiles/web/node_modules"), File(home, "profiles/node_modules"))
+    for ((bare, candidates) in aliases) {
+      val real = candidates.map { File(realRoot, it) }.firstOrNull { it.exists() }
+      if (real == null) {
+        Log.w(TAG, "bare dep $bare: no source under " + realRoot.absolutePath)
+        continue
+      }
+      for (base in bases) {
+        val link = File(base, bare)
         if (link.exists()) continue
         base.mkdirs()
         try {
           Files.createSymbolicLink(link.toPath(), real.toPath())
-        } catch (_: Exception) {
-          try { real.copyRecursively(link, overwrite = false) } catch (_: Exception) {}
+          Log.i(TAG, "bare dep $bare -> " + real.absolutePath)
+        } catch (t: Throwable) {
+          try {
+            real.copyRecursively(link, overwrite = false)
+            Log.i(TAG, "bare dep $bare copied -> " + link.absolutePath)
+          } catch (e: Exception) {
+            Log.w(TAG, "bare dep $bare alias failed: " + e.message)
+          }
         }
       }
     }
@@ -493,9 +516,10 @@ class EngineManager(private val context: Context, private val pickToken: String?
       } else {
         File(webNodeModules, pkgName)
       }
-      if (File(target, "package.json").exists() && File(target, "package.json").length() > 0) return
-      target.mkdirs()
-      copyAssetTree("patched/$assetDir", target)
+      val bundledVersion = assetPluginVersion(assetDir)
+      if (syncPluginTree(assetDir, target, bundledVersion)) {
+        Log.i(TAG, "desktop plugin synced: $pkgName -> " + target.absolutePath)
+      }
       // DSH loader 需要 profiles 顶层 node_modules 也能解析（部分版本）。
       val topTarget = if (scoped) {
         val scope = pkgName.substringBefore('/')
@@ -503,15 +527,47 @@ class EngineManager(private val context: Context, private val pickToken: String?
       } else {
         File(File(home, "profiles/node_modules"), pkgName)
       }
-      if (!File(topTarget, "package.json").exists()) {
-        topTarget.mkdirs()
-        copyAssetTree("patched/$assetDir", topTarget)
-      }
+      syncPluginTree(assetDir, topTarget, bundledVersion)
       // 是否写入 cordis 由 PluginCatalog.applyToggles 按开关决定。
-      Log.i(TAG, "desktop plugin files ready: $pkgName -> " + target.absolutePath)
     } catch (e: Exception) {
       Log.e(TAG, "install desktop plugin $pkgName failed", e)
     }
+  }
+
+  /**
+   * 把内置插件铺到 target：包版本一致就跳过；版本变了（或首次）整目录重铺。
+   *
+   * v0.15.x 事故：旧逻辑"package.json 存在就 return"，于是手机里 imagegen 一直停在
+   * 1.0.5，新包 1.5.1 的 lib 与 node_modules 永远铺不进去；而 imagegen 又被标成
+   * safe 插件、安全模式关不掉，引擎启动直接超时 = 手机用不了。
+   * @return true 表示本次真的写了文件。
+   */
+  private fun syncPluginTree(assetDir: String, target: File, bundledVersion: String?): Boolean {
+    val pkg = File(target, "package.json")
+    val present = pkg.exists() && pkg.length() > 0
+    val installedVersion = if (present) readPluginVersion(pkg.readText()) else null
+    if (present && (bundledVersion == null || installedVersion == bundledVersion)) return false
+    if (present) {
+      Log.i(TAG, "plugin $assetDir " + (installedVersion ?: "?") + " -> " + (bundledVersion ?: "?") + ": re-laying out")
+      if (!target.deleteRecursively()) Log.w(TAG, "plugin dir delete failed: " + target.absolutePath)
+    }
+    target.mkdirs()
+    copyAssetTree("patched/$assetDir", target)
+    return true
+  }
+
+  /** 读 assets/patched/<assetDir>/package.json 的 version（读不到返回 null）。 */
+  private fun assetPluginVersion(assetDir: String): String? = try {
+    context.assets.open("patched/$assetDir/package.json").bufferedReader().use { readPluginVersion(it.readText()) }
+  } catch (_: Exception) {
+    null
+  }
+
+  /** 从 package.json 文本里取 version 字段（org.json 随 Android 提供）。 */
+  private fun readPluginVersion(text: String): String? = try {
+    org.json.JSONObject(text).optString("version").ifBlank { null }
+  } catch (_: Exception) {
+    null
   }
 
   /** 把 assets 下的一棵目录树复制到目标目录（递归）。 */

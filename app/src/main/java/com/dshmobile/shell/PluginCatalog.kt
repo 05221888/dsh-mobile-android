@@ -66,11 +66,27 @@ object PluginCatalog {
       .edit().putBoolean(plugin.id, enabled).apply()
   }
 
-  /** 引擎超时后关掉不安全插件，保留记忆/休闲区等 safe 项。 */
+  /** 一级兜底：引擎超时后关掉不安全的插件，保留 memory-evolve / leisure-zone 等 safe 项。 */
   fun enableOnlyBootCritical(context: Context) {
     val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
     for (plugin in list(context)) {
       prefs.putBoolean(plugin.id, plugin.safe)
+    }
+    prefs.apply()
+  }
+
+  /**
+   * 二级兜底：只留 bootCritical 插件（记忆/休闲区/生图/问题导航全关）。
+   *
+   * 为什么需要：safe 是"平时可以常开"的标记，不是"绝不会拖垮引擎"的保证。
+   * v0.15.x 的 imagegen 被标了 safe=true，但它依赖的 schemastery 丢了，
+   * 一级兜底关不掉它 → 两次启动都超时 → 手机上直接进不去。二级兜底把
+   * 所有非 bootCritical 项关掉，保证"能进聊天"这条底线。
+   */
+  fun enableMinimalSet(context: Context) {
+    val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+    for (plugin in list(context)) {
+      prefs.putBoolean(plugin.id, plugin.bootCritical)
     }
     prefs.apply()
   }

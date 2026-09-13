@@ -1,9 +1,10 @@
-The sound files in this directory are from Stephanvs/opencode-sfx,
-licensed under the MIT License:
-
 MIT License
 
-Copyright (c) 2026 Stephan van Stekelenburg
+Copyright (c) 2026 dsh-notify-sound contributors
+
+Sound synthesis parameters and event-detection approach derived from
+dsh-plugin-notify-sound (https://github.com/ldchaowin/dsh-plugin-notify-sound,
+MIT).
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -22,5 +23,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
-Source: https://github.com/Stephanvs/opencode-sfx

@@ -1,7 +1,7 @@
 {
     "name":  "@wushenghuang/dsh-memory-sync-hub",
-    "version":  "0.1.0",
-    "description":  "Cross-device DSH memory sync via Gitee private repo as relay: two-way merge of ~/.dsh/memories between desktop PC and mobile APK, plus installed-plugin manifest exchange. Pure Node builtins, zero npm deps, no git binary needed.",
+    "version":  "0.2.0",
+    "description":  "Cross-device DSH memory sync + peer mailbox poll: Gitee private repo relay for memories, plus a timer that auto-wakes a dedicated session only when there is unread task mail. Empty inbox never calls the model.",
     "type":  "module",
     "main":  "lib/index.js",
     "exports":  {
@@ -17,6 +17,12 @@
                   "LICENSE",
                   "cordis.patch.yml"
               ],
+    "dsh": {
+        "runtime": "host",
+        "bundle": {
+            "patch": "./cordis.patch.yml"
+        }
+    },
     "license":  "MIT",
     "keywords":  [
                      "dsh",

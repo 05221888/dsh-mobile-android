@@ -10,6 +10,8 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.core.content.FileProvider
+import org.apache.commons.compress.compressors.xz.XZCompressorInputStream
+import java.io.BufferedInputStream
 import java.io.File
 
 /** 进聊天后的手机设置：Shizuku、插件、检查更新。 */
@@ -103,16 +105,33 @@ class PhoneSettingsActivity : ComponentActivity() {
           return@Thread
         }
         runOnUiThread { status.text = "发现 " + update.versionName + "，正在下载…" }
-        val dest = File(filesDir, "dsh-update.apk")
-        mgr.downloadApk(update, dest) { msg -> runOnUiThread { status.text = msg } }
-        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", dest)
+        // 1) 下载。文件名按真实内容起名：url 是 .apk.xz → 用 .apk.xz。
+        val compressed = File(filesDir, "dsh-update.apk.xz")
+        mgr.downloadApk(update, compressed) { msg -> runOnUiThread { status.text = msg } }
+        runOnUiThread { status.text = "下载完成，正在解压…" }
+
+        // 2) 解压 xz → 真 APK。
+        //    Gitee 附件上限 100MB，APK 128MB 必须 xz 压缩后再上传；
+        //    Android 系统安装器只认 .apk，xz 流会被拒为「解析软件包失败 (33) PackageInfo is null」。
+        val apk = File(filesDir, "dsh-update.apk")
+        compressed.inputStream().use { raw ->
+          BufferedInputStream(raw).use { buf ->
+            XZCompressorInputStream(buf).use { xz ->
+              apk.outputStream().use { out -> xz.copyTo(out) }
+            }
+          }
+        }
+        compressed.delete()
+
+        // 3) 真 APK 给安装器。
+        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", apk)
         val intent = Intent(Intent.ACTION_VIEW).apply {
           setDataAndType(uri, "application/vnd.android.package-archive")
           addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
           addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         runOnUiThread {
-          status.text = "下载完成，即将打开安装器（覆盖安装，不要卸载）"
+          status.text = "解压完成，即将打开安装器（覆盖安装，不要卸载）"
           startActivity(intent)
         }
       } catch (t: Throwable) {

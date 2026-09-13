@@ -1,20 +1,46 @@
-import { SettingsConflictError, installSettingsSection, settingsNamespace } from "@deepseek-ai/dsh-settings";
+import * as settingsModule from "@deepseek-ai/dsh-settings";
+import { SettingsConflictError } from "@deepseek-ai/dsh-settings";
 import z from "schemastery";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promises } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import { defineTool } from "@deepseek-ai/dsh-tools";
+//#region src/settings-compat.ts
+const compatModule = settingsModule;
+/** Brand namespaces where the installed settings package still exposes it. */
+function settingsNamespaceCompat(value) {
+	return compatModule.settingsNamespace?.(value) ?? value;
+}
+/**
+* Register an optional settings section across the rc.7 and alpha.2 APIs.
+* rc.7 exposes a module helper; alpha.2 moves the helper onto the provider.
+*/
+function installSettingsSectionCompat(ctx, ns, schema, entry, hooks) {
+	const legacyInstaller = compatModule.installSettingsSection;
+	if (legacyInstaller !== void 0) {
+		legacyInstaller(ctx, ns, schema, entry, hooks);
+		return;
+	}
+	ctx.inject(["settings"], (sctx) => {
+		const provider = sctx.get("settings");
+		if (provider.installSection === void 0) throw new TypeError("dsh-settings does not expose installSection");
+		provider.installSection(ctx, ns, schema, entry, hooks);
+	});
+}
+//#endregion
 //#region src/protocol.ts
 /**
 * Wire contract shared by the host and client halves of dsh-imagegen: the
 * settings namespace, the route paths, and the generate payload/result shapes.
-* Pure types + constants — safe for the client bundle to inline.
+* Pure types + constants 鈥?safe for the client bundle to inline.
 */
 /** Settings namespace this plugin owns (host settings seam + bridge). */
 const IMAGEGEN_SETTINGS_NAMESPACE = "dsh-imagegen";
 /** Published package version shared by the host updater and the client UI. */
-const PLUGIN_VERSION = "1.0.5";
+const PLUGIN_VERSION = "1.5.1";
 /** Same-origin route family (loopback-only, mirroring the dsh-ssh fence). */
 const SETTINGS_API = {
 	describe: "/api/dsh-imagegen/settings/describe",
@@ -22,11 +48,31 @@ const SETTINGS_API = {
 };
 /** The image-generation proxy route. */
 const GENERATE_API = "/api/dsh-imagegen/generate";
-/** Host-mediated image-generation profile routes. */
-const PROFILES_API = {
-	list: "/api/dsh-imagegen/profiles/list",
-	save: "/api/dsh-imagegen/profiles/save",
-	remove: "/api/dsh-imagegen/profiles/remove"
+/** Host-mediated OpenAI-compatible prompt enhancement endpoints. */
+const PROMPT_ENHANCE_API = {
+	models: "/api/dsh-imagegen/prompt-enhance/models",
+	enhance: "/api/dsh-imagegen/prompt-enhance"
+};
+/** Host-mediated candidate discovery for the configured image API. */
+const IMAGE_MODEL_API = { models: "/api/dsh-imagegen/image-models" };
+/** Host-served built-in provider catalog (channels the user can instantiate). */
+const PRESETS_API = "/api/dsh-imagegen/presets";
+/** Loopback-only image reader for Agent tool-result previews. */
+const AGENT_IMAGE_API = "/api/dsh-imagegen/agent-image";
+/** Store the current composer image for the direct edit_image command. */
+const CONVERSATION_IMAGE_API = "/api/dsh-imagegen/conversation-image";
+/**
+* Host-computed per-channel usage counters (generation-count badges in the
+* settings card): entries are tallied from the persisted history and gallery
+* by channel + model alias.
+*/
+const USAGE_API = "/api/dsh-imagegen/usage";
+/** Host-resident generation queue endpoints. */
+const TASK_API = {
+	submit: "/api/dsh-imagegen/tasks/submit",
+	list: "/api/dsh-imagegen/tasks/list",
+	cancel: "/api/dsh-imagegen/tasks/cancel",
+	retry: "/api/dsh-imagegen/tasks/retry"
 };
 /** Host-mediated GitHub Release update routes. */
 const UPDATE_API = {
@@ -46,6 +92,294 @@ const HISTORY_API = {
 	clear: "/api/dsh-imagegen/history/clear",
 	image: "/api/dsh-imagegen/history/image"
 };
+/**
+* Same-origin route family for the user-curated gallery (favorites). Entries
+* reuse the history wire shape and persist under ~/.dsh/dsh-imagegen/gallery/;
+* unlike history there is no size cap 鈥?the user adds images on purpose.
+*/
+const GALLERY_API = {
+	list: "/api/dsh-imagegen/gallery/list",
+	append: "/api/dsh-imagegen/gallery/append",
+	remove: "/api/dsh-imagegen/gallery/remove",
+	clear: "/api/dsh-imagegen/gallery/clear",
+	tags: "/api/dsh-imagegen/gallery/tags",
+	image: "/api/dsh-imagegen/gallery/image"
+};
+/**
+* Same-origin route family for the bundled prompt-template library
+* (awesome-gpt-image-2 mirror). The case list ships inside the package and is
+* served by the host; reference images are proxied through the `image` prefix
+* route and cached on disk so repeated views never hit the network again.
+*/
+const TEMPLATES_API = {
+	list: "/api/dsh-imagegen/templates/list",
+	refresh: "/api/dsh-imagegen/templates/refresh",
+	image: "/api/dsh-imagegen/templates/image"
+};
+//#endregion
+//#region src/model-catalog.ts
+const ENTRIES = {
+	"gpt-image": {
+		label: "gpt-image",
+		labelZh: "GPT 图像",
+		known: true,
+		supportsEdit: true,
+		supportsAspectRatio: false,
+		qualityTiers: [
+			"1K",
+			"2K",
+			"4K"
+		]
+	},
+	"dall-e": {
+		label: "DALL·E",
+		labelZh: "DALL·E",
+		known: true,
+		supportsEdit: true,
+		supportsAspectRatio: false,
+		qualityTiers: ["auto"]
+	},
+	grok: {
+		label: "grok",
+		labelZh: "Grok",
+		known: true,
+		supportsEdit: true,
+		supportsAspectRatio: true,
+		qualityTiers: ["1K", "2K"]
+	},
+	nanobanana: {
+		label: "nanobanana",
+		labelZh: "Nano Banana",
+		known: true,
+		supportsEdit: true,
+		supportsAspectRatio: true,
+		qualityTiers: [
+			"1K",
+			"2K",
+			"4K"
+		]
+	},
+	seedream: {
+		label: "seedream",
+		labelZh: "Seedream",
+		known: true,
+		supportsEdit: true,
+		supportsAspectRatio: true,
+		qualityTiers: ["1K", "2K"]
+	},
+	zhipu: {
+		label: "GLM-Image",
+		labelZh: "智谱图像",
+		known: true,
+		supportsEdit: false,
+		supportsAspectRatio: false,
+		qualityTiers: ["HD"]
+	}
+};
+/** Official Gemini image ids served by Nano Banana gateways. */
+const NANOBANANA_GEMINI_IDS = /* @__PURE__ */ new Set([
+	"gemini-3-pro-image",
+	"gemini-3-pro-image-preview",
+	"gemini-3.1-flash-image",
+	"gemini-3.1-flash-image-preview",
+	"gemini-3.1-flash-lite-image",
+	"gemini-2.5-flash-image"
+]);
+/** Classify one upstream model id into its request-shaping family. */
+function describeModel(model) {
+	const id = model.trim();
+	if (/^gpt-image/i.test(id)) return {
+		family: "gpt-image",
+		...ENTRIES["gpt-image"]
+	};
+	if (/^dall-e/i.test(id)) return {
+		family: "dall-e",
+		...ENTRIES["dall-e"]
+	};
+	if (/^grok-imagine(?:-|$)/.test(id)) return {
+		family: "grok",
+		...ENTRIES.grok
+	};
+	if (/^nanobanana/i.test(id) || NANOBANANA_GEMINI_IDS.has(id)) return {
+		family: "nanobanana",
+		...ENTRIES.nanobanana
+	};
+	if (/^(?:doubao-)?seedream/i.test(id)) return {
+		family: "seedream",
+		...ENTRIES.seedream
+	};
+	if (/^(?:glm-image|cogview(?:-|$))/i.test(id)) return {
+		family: "zhipu",
+		...ENTRIES.zhipu
+	};
+	return {
+		family: "unknown",
+		label: "unknown",
+		labelZh: "未知协议",
+		known: false,
+		supportsEdit: true,
+		supportsAspectRatio: false,
+		qualityTiers: []
+	};
+}
+/** Conservative fallback for providers whose /models response only has ids.
+*  Metadata-aware filtering lives in prompt-enhancer.ts; this catches common
+*  image model naming conventions without treating every unknown model as an
+*  image model. */
+function isLikelyImageModelId(model) {
+	return /(?:^|[-_.])(?:image|img|diffusion|flux|cogview|imagen|seedream|nanobanana|grok-imagine|dall-e|stable-diffusion|sdxl|pixart|kolors|ideogram|midjourney|recraft|hunyuan|jimeng|wanx|hidream|playground)(?:$|[-_.])/i.test(model.trim());
+}
+/** The family a model id routes its request through. */
+function modelFamily(model) {
+	return describeModel(model).family;
+}
+//#endregion
+//#region src/prompt-enhancer.ts
+/** OpenAI-compatible chat helpers used by the optional prompt-enhancement UI. */
+function endpoint(base, suffix) {
+	return `${base.replace(/\/+$/, "")}${suffix}`;
+}
+function headers(apiKey) {
+	return {
+		"content-type": "application/json",
+		...apiKey.trim() === "" ? {} : { authorization: `Bearer ${apiKey.trim()}` }
+	};
+}
+async function responseJson(response) {
+	const body = await response.json().catch(() => void 0);
+	if (!response.ok || body === void 0 || body === null || typeof body !== "object") {
+		const message = body !== null && typeof body === "object" && typeof body.error?.message === "string" ? body.error.message : `HTTP ${response.status}`;
+		throw new Error(message);
+	}
+	return body;
+}
+async function listModelRecords(config) {
+	if (config.apiUrl.trim() === "") throw new Error("API URL is required");
+	const body = await responseJson(await fetch(endpoint(config.apiUrl, "/models"), { headers: headers(config.apiKey) }));
+	return (Array.isArray(body.data) ? body.data : []).flatMap((item) => {
+		if (item === null || typeof item !== "object" || typeof item.id !== "string") return [];
+		const id = item.id.trim();
+		return id === "" ? [] : [{
+			...item,
+			id
+		}];
+	});
+}
+function textOf(value) {
+	if (typeof value === "string") return [value];
+	if (!Array.isArray(value)) return [];
+	return value.filter((item) => typeof item === "string");
+}
+function hasImageGenerationCapability(record) {
+	const capability = record.capabilities;
+	if (capability !== null && typeof capability === "object") {
+		const values = capability;
+		for (const key of [
+			"image_generation",
+			"imageGeneration",
+			"text_to_image",
+			"textToImage",
+			"image_gen"
+		]) if (typeof values[key] === "boolean") return values[key];
+		const serialized = JSON.stringify(values).toLowerCase();
+		if (/image[ _-]?generation|text[ _-]?to[ _-]?image/.test(serialized)) return true;
+	}
+	const taskText = [
+		...textOf(record.task),
+		...textOf(record.task_type),
+		...textOf(record.taskType),
+		...textOf(record.type),
+		...textOf(record.model_type),
+		...textOf(record.modelType),
+		...textOf(record.tasks),
+		...textOf(record.description)
+	].join(" ").toLowerCase();
+	if (/image[ _-]?generation|text[ _-]?to[ _-]?image|image[ _-]?gen/.test(taskText)) return true;
+	if (/^image(?:[ _-]?generation)?$/.test(taskText.trim())) return true;
+	if (/embedding|rerank|moderation|transcri|speech|audio|video|chat[ _-]?completion/.test(taskText)) return false;
+	for (const key of [
+		"output_modalities",
+		"outputModalities",
+		"supported_output_modalities"
+	]) {
+		const modalities = textOf(record[key]).map((value) => value.toLowerCase());
+		if (modalities.length > 0) return modalities.includes("image");
+	}
+}
+function isImageModelRecord(record) {
+	return hasImageGenerationCapability(record) ?? isLikelyImageModelId(record.id);
+}
+/** List candidates exposed by an OpenAI-compatible endpoint. */
+async function listOpenAIModels(config) {
+	return [...new Set((await listModelRecords(config)).map((record) => record.id))].sort((a, b) => a.localeCompare(b));
+}
+/** List only models that advertise or conventionally represent image generation. */
+async function listImageModels(config) {
+	return [...new Set((await listModelRecords(config)).filter(isImageModelRecord).map((record) => record.id))].sort((a, b) => a.localeCompare(b));
+}
+/** List chat models exposed by an OpenAI-compatible endpoint. */
+async function listPromptModels(config) {
+	return listOpenAIModels(config);
+}
+/** Expand a concise image request into a production-ready image prompt. */
+async function enhancePrompt(config, prompt) {
+	if (config.apiUrl.trim() === "" || config.model.trim() === "") throw new Error("prompt enhancement model is not configured");
+	const body = await responseJson(await fetch(endpoint(config.apiUrl, "/chat/completions"), {
+		method: "POST",
+		headers: headers(config.apiKey),
+		body: JSON.stringify({
+			model: config.model.trim(),
+			temperature: .7,
+			messages: [{
+				role: "system",
+				content: "You are an expert image-prompt editor. Expand the user request into one vivid, specific image-generation prompt. Preserve intent and language. Add only useful visual detail: subject, composition, lighting, materials, color, camera/style and quality. Return only the finished prompt, with no preface or markdown."
+			}, {
+				role: "user",
+				content: prompt
+			}]
+		})
+	}));
+	const choices = Array.isArray(body.choices) ? body.choices : [];
+	const content = choices[0] !== null && typeof choices[0] === "object" ? choices[0].message?.content : void 0;
+	if (typeof content !== "string" || content.trim() === "") throw new Error("chat model returned an empty prompt");
+	return content.trim();
+}
+//#endregion
+//#region src/image-models.ts
+/**
+* Image-model configuration shared by the host, panel, and Agent tools.
+* `/models` exposes candidates only: the configured list is the explicit
+* allow-list because OpenAI-compatible gateways rarely advertise modalities.
+*/
+const DEFAULT_IMAGE_MODELS = [
+	"gpt-image-2",
+	"grok-imagine-image",
+	"nanobanana2",
+	"nanobanana2-lite",
+	"nanobanana-pro",
+	"seedream-5.0-pro",
+	"glm-image"
+];
+/** Normalize user-entered model identifiers and retain a usable legacy default. */
+function normalizeImageModels(value) {
+	const candidates = Array.isArray(value) ? value : [];
+	const unique = /* @__PURE__ */ new Set();
+	for (const candidate of candidates) {
+		if (typeof candidate !== "string") continue;
+		const model = candidate.trim();
+		if (model !== "") unique.add(model);
+	}
+	return unique.size > 0 ? [...unique] : [...DEFAULT_IMAGE_MODELS];
+}
+//#endregion
+//#region src/image-format.ts
+function detectImageMime(data) {
+	const startsWith = (...bytes) => bytes.every((value, index) => data[index] === value);
+	if (startsWith(137, 80, 78, 71, 13, 10, 26, 10)) return "image/png";
+	if (startsWith(255, 216, 255)) return "image/jpeg";
+	if (startsWith(71, 73, 70, 56, 55, 97) || startsWith(71, 73, 70, 56, 57, 97)) return "image/gif";
+	if (startsWith(82, 73, 70, 70) && data[8] === 87 && data[9] === 69 && data[10] === 66 && data[11] === 80) return "image/webp";
+}
 //#endregion
 //#region src/engine.ts
 /** A generation failure with a user-presentable message. */
@@ -70,6 +404,92 @@ const DALLE3_SIZES = /* @__PURE__ */ new Set([
 	"1792x1024",
 	"1024x1792"
 ]);
+/** The wire model id for a request: `upstream` (host-filled alias mapping)
+*  wins, then the alias, then the family default. */
+function wireModel(request) {
+	const upstream = request.upstream?.trim();
+	if (upstream !== void 0 && upstream !== "") return upstream;
+	const alias = request.model.trim();
+	return alias === "" ? "gpt-image-2" : alias;
+}
+/** Whether the model is an xAI Grok Imagine model (grok-imagine-image,
+*  grok-imagine-image-2.0, …). Grok Imagine speaks JSON on both endpoints
+*  and exposes its own aspect-ratio / response-format knobs instead of the
+*  OpenAI size/quality/detail passthrough. */
+function isGrokImagine(model) {
+	return modelFamily(model) === "grok";
+}
+/** Whether the model belongs to the Google Nano Banana family (nanobanana2 /
+*  nanobanana2-lite / nanobanana-pro, plus the official Gemini image IDs the
+*  gateways expose). OpenAI-compatible gateways serve these with their own
+*  aspect_ratio / image_size vocabulary instead of the OpenAI size/quality
+*  passthrough. */
+function isNanoBanana(model) {
+	return modelFamily(model) === "nanobanana";
+}
+/** Whether the model belongs to the ByteDance Seedream family (seedream-5.0-pro,
+*  seedream-5.0, seedream-4.x, doubao-seedream-…). OpenAI-compatible gateways
+*  serve Seedream through a unified generate-and-edit architecture:
+*  generation AND editing both go to /images/generations and reference images
+*  are a JSON URL / data-URL array. */
+function isSeedream(model) {
+	return modelFamily(model) === "seedream";
+}
+/** Whether the model uses the official Zhipu image-generation contract. */
+function isZhipuImage(model) {
+	return modelFamily(model) === "zhipu";
+}
+function isGlmImage(model) {
+	return /^glm-image(?:-|$)/i.test(model.trim());
+}
+/** Whether this is the official Volcengine Ark model naming convention. */
+function isVolcSeedream(model) {
+	return /^doubao-seedream(?:-|$)/i.test(model.trim());
+}
+/** Volcengine uses `size` for the output tier, not the panel's aspect ratio. */
+function seedreamSize(quality) {
+	if (quality === "1k") return "1K";
+	return "2K";
+}
+/** The panel's aspect ratios mapped to the closest OpenAI pixel size
+*  (gpt-image-2 / generic OpenAI-compatible endpoints). */
+const OPENAI_SIZE_BY_RATIO = {
+	"1:1": "1024x1024",
+	"3:4": "1024x1536",
+	"4:3": "1536x1024",
+	"9:16": "1024x1792",
+	"2:3": "1024x1536",
+	"3:2": "1536x1024",
+	"16:9": "1792x1024",
+	"21:9": "1792x1024"
+};
+/** Panel ratios that need renaming for a model's vocabulary. Grok documents
+*  20:9 as its ultra-wide ratio, so the panel's 21:9 label is sent as 20:9. */
+const GROK_ASPECT_ALIASES = { "21:9": "20:9" };
+/**
+* One request-scoped timeout that is cleared as soon as its fetch settles.
+* AbortSignal.timeout() cannot be disposed early; using it inside a long-lived
+* task queue leaves an otherwise idle Node process holding every timeout.
+*/
+function requestSignal(source, timeoutMs) {
+	const controller = new AbortController();
+	const abortFromSource = () => {
+		controller.abort(source?.reason);
+	};
+	if (source?.aborted === true) abortFromSource();
+	else source?.addEventListener("abort", abortFromSource, { once: true });
+	const timeout = setTimeout(() => {
+		controller.abort(new DOMException("The operation timed out.", "TimeoutError"));
+	}, timeoutMs);
+	timeout.unref();
+	return {
+		signal: controller.signal,
+		dispose: () => {
+			clearTimeout(timeout);
+			source?.removeEventListener("abort", abortFromSource);
+		}
+	};
+}
 /** Content-type extension hints for URL-fetched images. */
 function mimeOfExtension(path) {
 	const match = /\.([a-z0-9]+)$/i.exec(path);
@@ -98,6 +518,19 @@ function bareBase64(value) {
 	const parsed = parseDataUrl(value);
 	return parsed !== void 0 && parsed.base64 !== void 0 ? parsed.base64 : value;
 }
+/** Whether a result URL carries cloud-storage signing credentials. */
+function isPresignedUrl(value) {
+	let url;
+	try {
+		url = new URL(value);
+	} catch {
+		return false;
+	}
+	const params = new Set(Array.from(url.searchParams.keys(), (key) => key.toLowerCase()));
+	if (params.has("x-goog-signature") || params.has("x-goog-credential")) return true;
+	if (params.has("x-amz-signature") || params.has("x-amz-credential")) return true;
+	return params.has("signature") && (params.has("expires") || params.has("googleaccessid") || params.has("awsaccesskeyid"));
+}
 /** Clamp the requested image count into the API-accepted range. */
 function clampCount(n) {
 	if (!Number.isFinite(n)) return 1;
@@ -107,31 +540,61 @@ function clampCount(n) {
 *  batch parameter is rejected by Responses-API-based gateways (tools[0].n),
 *  so the count is satisfied by parallel single-image requests instead. */
 function effectiveParams(request) {
-	const model = request.model.trim() === "" ? "fal-ai/gpt-image-2" : request.model.trim();
-	if (model === "dall-e-3") return {
+	const model = wireModel(request);
+	if (model === "dall-e-3") {
+		const pixel = OPENAI_SIZE_BY_RATIO[request.size];
+		return {
+			model,
+			size: pixel !== void 0 && DALLE3_SIZES.has(pixel) ? pixel : "1024x1024"
+		};
+	}
+	if (isGrokImagine(model)) return {
 		model,
-		size: DALLE3_SIZES.has(request.size) ? request.size : "1024x1024"
+		...request.size !== "" && request.size !== "auto" ? { aspect_ratio: GROK_ASPECT_ALIASES[request.size] ?? request.size } : {},
+		...request.quality !== "" && request.quality !== "auto" ? { resolution: request.quality === "4k" ? "2k" : request.quality } : {},
+		response_format: "b64_json"
+	};
+	if (isNanoBanana(model)) return {
+		model,
+		...request.size !== "" && request.size !== "auto" ? { aspect_ratio: request.size } : {},
+		...request.quality !== "" && request.quality !== "auto" ? { image_size: request.quality.toUpperCase() } : {},
+		response_format: "b64_json"
+	};
+	if (isSeedream(model)) return {
+		model,
+		size: seedreamSize(request.quality),
+		response_format: isVolcSeedream(model) ? "url" : "b64_json"
+	};
+	if (isZhipuImage(model)) return {
+		model,
+		...request.size !== "" && request.size !== "auto" && OPENAI_SIZE_BY_RATIO[request.size] !== void 0 ? { size: OPENAI_SIZE_BY_RATIO[request.size] } : {},
+		quality: isGlmImage(model) ? "hd" : "standard"
 	};
 	return {
 		model,
-		...request.size !== "" && request.size !== "auto" ? { size: request.size } : {},
-		...request.quality !== "" && request.quality !== "auto" ? { quality: request.quality } : {},
+		...request.size !== "" && request.size !== "auto" && OPENAI_SIZE_BY_RATIO[request.size] !== void 0 ? { size: OPENAI_SIZE_BY_RATIO[request.size] } : {},
+		...request.quality === "1k" ? { quality: "low" } : {},
+		...request.quality === "2k" ? { quality: "medium" } : {},
+		...request.quality === "4k" ? { quality: "high" } : {},
 		...request.detail !== "" ? { detail: request.detail } : {}
 	};
 }
 /** How many single-image requests to issue for the requested image count. */
 function effectiveCount(request) {
-	if ((request.model.trim() === "" ? "fal-ai/gpt-image-2" : request.model.trim()) === "dall-e-3") return 1;
+	if (wireModel(request) === "dall-e-3") return 1;
 	return clampCount(request.n);
 }
 /** Normalize one upstream data item into a base64 image. */
 async function normalizeItem(item, upstream) {
 	const revisedPrompt = typeof item.revised_prompt === "string" ? item.revised_prompt : void 0;
-	if (typeof item.b64_json === "string") return {
-		b64: bareBase64(item.b64_json),
-		mime: "image/png",
-		revisedPrompt
-	};
+	if (typeof item.b64_json === "string" && item.b64_json.trim() !== "") {
+		const b64 = bareBase64(item.b64_json);
+		if (b64.trim() !== "") return {
+			b64,
+			mime: detectImageMime(Buffer.from(b64, "base64")) ?? "image/png",
+			revisedPrompt
+		};
+	}
 	if (typeof item.url !== "string" || item.url === "") throw new ImageGenError("upstream image item has neither b64_json nor url");
 	const url = item.url;
 	if (url.startsWith("data:")) {
@@ -139,23 +602,26 @@ async function normalizeItem(item, upstream) {
 		if (parsed === void 0) throw new ImageGenError("upstream returned a malformed data: url");
 		return {
 			b64: parsed.base64,
-			mime: parsed.mime,
+			mime: detectImageMime(Buffer.from(parsed.base64, "base64")) ?? parsed.mime,
 			revisedPrompt
 		};
 	}
+	const budget = requestSignal(void 0, IMAGE_FETCH_TIMEOUT_MS);
 	let response;
 	try {
 		response = await fetch(url, {
-			headers: { ...upstream.apiKey === "" ? {} : { authorization: `Bearer ${upstream.apiKey}` } },
-			signal: AbortSignal.timeout(IMAGE_FETCH_TIMEOUT_MS)
+			...isPresignedUrl(url) || upstream.apiKey === "" ? {} : { headers: { authorization: `Bearer ${upstream.apiKey}` } },
+			signal: budget.signal
 		});
 	} catch (error) {
 		throw new ImageGenError(`failed to fetch the generated image url: ${error instanceof Error ? error.message : String(error)}`);
+	} finally {
+		budget.dispose();
 	}
 	if (!response.ok) throw new ImageGenError(`failed to fetch the generated image url: HTTP ${response.status}`);
 	const buffer = Buffer.from(await response.arrayBuffer());
 	const contentType = response.headers.get("content-type");
-	const mime = contentType !== null && contentType !== "" ? contentType.split(";")[0].trim() : mimeOfExtension(url) ?? "image/png";
+	const mime = detectImageMime(buffer) ?? (contentType !== null && contentType !== "" ? contentType.split(";")[0].trim() : mimeOfExtension(url) ?? "image/png");
 	return {
 		b64: buffer.toString("base64"),
 		mime,
@@ -166,7 +632,7 @@ async function normalizeItem(item, upstream) {
 * Issue one single-image request (never sends `n`). The response is kept as a
 * list so a gateway that happens to return several images per call still works.
 */
-async function requestOneImage(baseUrl, upstream, request, params) {
+async function requestOneImage(baseUrl, upstream, request, params, signal) {
 	const headers = { authorization: `Bearer ${upstream.apiKey.trim()}` };
 	let body;
 	if (request.mode === "edit") {
@@ -180,14 +646,46 @@ async function requestOneImage(baseUrl, upstream, request, params) {
 			throw new ImageGenError("参考图片数据无法解码", "edit-image-invalid");
 		}
 		if (bytes.byteLength > MAX_EDIT_IMAGE_BYTES) throw new ImageGenError("参考图片超过 10MB 上限", "edit-image-too-large");
-		const form = new FormData();
-		form.append("image", new Blob([bytes], { type: parsed.mime }), `reference.${extensionOf$1(parsed.mime)}`);
-		form.append("prompt", request.prompt);
-		form.append("model", params.model);
-		if (params.size !== void 0) form.append("size", params.size);
-		if (params.quality !== void 0) form.append("quality", params.quality);
-		if (params.detail !== void 0) form.append("detail", params.detail);
-		body = form;
+		if (isGrokImagine(params.model)) {
+			headers["content-type"] = "application/json";
+			body = JSON.stringify({
+				model: params.model,
+				prompt: request.prompt,
+				image: {
+					url: request.image,
+					type: "image_url"
+				},
+				...params.aspect_ratio !== void 0 ? { aspect_ratio: params.aspect_ratio } : {},
+				response_format: "b64_json"
+			});
+		} else if (isNanoBanana(params.model)) {
+			const form = new FormData();
+			form.append("image", new Blob([bytes], { type: parsed.mime }), `reference.${extensionOf$2(parsed.mime)}`);
+			form.append("prompt", request.prompt);
+			form.append("model", params.model);
+			if (params.aspect_ratio !== void 0) form.append("aspect_ratio", params.aspect_ratio);
+			if (params.image_size !== void 0) form.append("image_size", params.image_size);
+			body = form;
+		} else if (isSeedream(params.model)) {
+			headers["content-type"] = "application/json";
+			body = JSON.stringify({
+				model: params.model,
+				prompt: request.prompt,
+				image: [request.image],
+				...params.size !== void 0 ? { size: params.size } : {},
+				...params.resolution !== void 0 ? { resolution: params.resolution } : {},
+				response_format: isVolcSeedream(params.model) ? "url" : "b64_json"
+			});
+		} else {
+			const form = new FormData();
+			form.append("image", new Blob([bytes], { type: parsed.mime }), `reference.${extensionOf$2(parsed.mime)}`);
+			form.append("prompt", request.prompt);
+			form.append("model", params.model);
+			if (params.size !== void 0) form.append("size", params.size);
+			if (params.quality !== void 0) form.append("quality", params.quality);
+			if (params.detail !== void 0) form.append("detail", params.detail);
+			body = form;
+		}
 	} else {
 		headers["content-type"] = "application/json";
 		body = JSON.stringify({
@@ -195,18 +693,22 @@ async function requestOneImage(baseUrl, upstream, request, params) {
 			...params
 		});
 	}
+	const budget = requestSignal(signal, UPSTREAM_TIMEOUT_MS);
 	let response;
 	try {
-		response = await fetch(`${baseUrl}/images/${request.mode === "edit" ? "edits" : "generations"}`, {
+		const endpoint = request.mode === "edit" && !isSeedream(params.model) ? "/images/edits" : "/images/generations";
+		response = await fetch(`${baseUrl}${endpoint}`, {
 			method: "POST",
 			headers,
 			body,
-			signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)
+			signal: budget.signal
 		});
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		if (/aborter/i.test(message) || /timeout/i.test(message)) throw new ImageGenError("上游接口响应超时（240 秒）", "upstream-timeout");
 		throw new ImageGenError(`无法连接上游接口：${message}`, "upstream-unreachable");
+	} finally {
+		budget.dispose();
 	}
 	let payload;
 	try {
@@ -230,13 +732,14 @@ async function requestOneImage(baseUrl, upstream, request, params) {
 * parameter is never sent, because Responses-API-based gateways reject it as
 * `tools[0].n`), then the results are flattened in order.
 */
-async function generateImage(upstream, request) {
+async function generateImage(upstream, request, options = {}) {
 	const baseUrl = upstream.apiUrl.trim().replace(/\/+$/, "");
 	if (baseUrl === "") throw new ImageGenError("api_url 未配置：请先在「设置 → 插件 → 可配置」中填写", "config-missing");
 	if (upstream.apiKey.trim() === "") throw new ImageGenError("api_key 未配置：请先在「设置 → 插件 → 可配置」中填写", "config-missing");
+	if (request.mode === "edit" && isZhipuImage(wireModel(request))) throw new ImageGenError("智谱 GLM-Image 当前仅支持文生图，请切换到文生图模式或选择支持图生图的模型", "edit-unsupported");
 	const params = effectiveParams(request);
 	const count = effectiveCount(request);
-	return { images: (await Promise.all(Array.from({ length: count }, () => requestOneImage(baseUrl, upstream, request, params)))).flat() };
+	return { images: (await Promise.all(Array.from({ length: count }, () => requestOneImage(baseUrl, upstream, request, params, options.signal)))).flat() };
 }
 /** Human-readable failure message from an upstream error payload. */
 function upstreamMessage(payload, status) {
@@ -253,7 +756,7 @@ function upstreamMessage(payload, status) {
 	return `上游接口拒绝请求（HTTP ${status}）`;
 }
 /** File extension for a MIME type (multipart reference image). */
-function extensionOf$1(mime) {
+function extensionOf$2(mime) {
 	switch (mime.split(";")[0].trim()) {
 		case "image/jpeg": return "jpg";
 		case "image/webp": return "webp";
@@ -272,11 +775,378 @@ function extensionOf$1(mime) {
 *
 * Framework-free (node:fs only) so the route layer can drive it directly.
 */
-const HISTORY_DIR = path.join(homedir(), ".dsh", "dsh-imagegen");
-const INDEX_PATH = path.join(HISTORY_DIR, "index.json");
-const IMAGES_DIR = path.join(HISTORY_DIR, "images");
-let pendingMutation = Promise.resolve();
+const HISTORY_DIR$1 = path.join(homedir(), ".dsh", "dsh-imagegen");
+const INDEX_PATH$1 = path.join(HISTORY_DIR$1, "index.json");
+const IMAGES_DIR$1 = path.join(HISTORY_DIR$1, "images");
+let pendingMutation$1 = Promise.resolve();
 function mutateHistory(operation) {
+	const next = pendingMutation$1.then(operation, operation);
+	pendingMutation$1 = next.then(() => void 0, () => void 0);
+	return next;
+}
+/** File extension for a MIME type (image file names). */
+function extensionOf$1(mime) {
+	switch (mime.split(";")[0].trim()) {
+		case "image/jpeg": return "jpg";
+		case "image/webp": return "webp";
+		case "image/gif": return "gif";
+		default: return "png";
+	}
+}
+/** MIME type for a stored image file name (image route responses). */
+function mimeOfFile$2(file) {
+	switch (path.extname(file).toLowerCase()) {
+		case ".jpg":
+		case ".jpeg": return "image/jpeg";
+		case ".webp": return "image/webp";
+		case ".gif": return "image/gif";
+		default: return "image/png";
+	}
+}
+/** Sanitize an entry id for use as a file-name prefix. */
+function safeId$1(id) {
+	const cleaned = id.replace(/[^a-zA-Z0-9-]/g, "-");
+	return cleaned === "" ? "entry" : cleaned;
+}
+/** Ensure the storage directories exist. */
+async function ensureDirs$1() {
+	await promises.mkdir(IMAGES_DIR$1, { recursive: true });
+}
+/** Read the index, tolerating a missing/corrupt file. */
+async function readIndex$1() {
+	try {
+		const raw = await promises.readFile(INDEX_PATH$1, "utf8");
+		const parsed = JSON.parse(raw);
+		if (parsed === null || typeof parsed !== "object") return [];
+		const entries = parsed.entries;
+		if (!Array.isArray(entries)) return [];
+		return entries.filter(isStoredEntry$1);
+	} catch {
+		return [];
+	}
+}
+/** Persist the index. */
+async function writeIndex$1(entries) {
+	await ensureDirs$1();
+	const payload = { entries };
+	const tmp = `${INDEX_PATH$1}.tmp-${process.pid}`;
+	await promises.writeFile(tmp, JSON.stringify(payload), "utf8");
+	await promises.rename(tmp, INDEX_PATH$1);
+}
+/** Structural guard for a stored entry. */
+function isStoredEntry$1(value) {
+	if (value === null || typeof value !== "object") return false;
+	const entry = value;
+	return typeof entry.id === "string" && typeof entry.createdAt === "number" && (entry.mode === "text" || entry.mode === "edit") && (entry.workflow === void 0 || entry.workflow === "ecommerce") && (entry.projectId === void 0 || typeof entry.projectId === "string") && (entry.projectName === void 0 || typeof entry.projectName === "string") && (entry.slotKey === void 0 || typeof entry.slotKey === "string") && (entry.slotLabel === void 0 || typeof entry.slotLabel === "string") && typeof entry.prompt === "string" && Array.isArray(entry.images) && entry.images.every((image) => {
+		if (image === null || typeof image !== "object") return false;
+		const record = image;
+		return typeof record.file === "string" && typeof record.mime === "string";
+	});
+}
+/** Remove one entry's image files (best effort). */
+async function removeEntryFiles$1(entry) {
+	for (const image of entry.images) try {
+		await promises.rm(path.join(IMAGES_DIR$1, image.file), { force: true });
+	} catch {}
+}
+/** Project a stored entry onto the wire shape (image URLs). */
+function toWire$1(entry) {
+	return {
+		id: entry.id,
+		createdAt: entry.createdAt,
+		mode: entry.mode,
+		model: entry.model,
+		prompt: entry.prompt,
+		size: entry.size,
+		quality: entry.quality,
+		detail: entry.detail,
+		n: entry.n,
+		images: entry.images.map((image) => ({
+			url: `/api/dsh-imagegen/history/image/${image.file}`,
+			mime: image.mime,
+			...image.revisedPrompt === void 0 ? {} : { revisedPrompt: image.revisedPrompt }
+		})),
+		...entry.refName === void 0 ? {} : { refName: entry.refName },
+		...entry.channel === void 0 ? {} : { channel: entry.channel },
+		...entry.channelId === void 0 ? {} : { channelId: entry.channelId },
+		...entry.comparisonId === void 0 ? {} : { comparisonId: entry.comparisonId },
+		...entry.comparisonModels === void 0 ? {} : { comparisonModels: entry.comparisonModels },
+		...entry.workflow === void 0 ? {} : { workflow: entry.workflow },
+		...entry.projectId === void 0 ? {} : { projectId: entry.projectId },
+		...entry.projectName === void 0 ? {} : { projectName: entry.projectName },
+		...entry.slotKey === void 0 ? {} : { slotKey: entry.slotKey },
+		...entry.slotLabel === void 0 ? {} : { slotLabel: entry.slotLabel }
+	};
+}
+/** List the persisted history, newest first, as wire entries. */
+async function listHistory() {
+	return (await readIndex$1()).map(toWire$1);
+}
+/** Append one generation, evicting the oldest beyond HISTORY_MAX. */
+async function appendHistory(input) {
+	return mutateHistory(async () => {
+		await ensureDirs$1();
+		const prefix = safeId$1(input.id);
+		const storedImages = [];
+		try {
+			for (let index = 0; index < input.images.length; index++) {
+				const image = input.images[index];
+				const file = `${prefix}-${index}.${extensionOf$1(image.mime)}`;
+				await promises.writeFile(path.join(IMAGES_DIR$1, file), Buffer.from(image.b64, "base64"));
+				storedImages.push({
+					file,
+					mime: image.mime,
+					...image.revisedPrompt === void 0 ? {} : { revisedPrompt: image.revisedPrompt }
+				});
+			}
+		} catch (error) {
+			await removeEntryFiles$1({ images: storedImages });
+			throw error;
+		}
+		const merged = [{
+			id: input.id,
+			createdAt: input.createdAt,
+			mode: input.mode,
+			model: input.model,
+			prompt: input.prompt,
+			size: input.size,
+			quality: input.quality,
+			detail: input.detail,
+			n: input.n,
+			images: storedImages,
+			...input.refName === void 0 ? {} : { refName: input.refName },
+			...input.channelId === void 0 ? {} : { channelId: input.channelId },
+			...input.channel === void 0 ? {} : { channel: input.channel },
+			...input.comparisonId === void 0 ? {} : { comparisonId: input.comparisonId },
+			...input.comparisonModels === void 0 ? {} : { comparisonModels: input.comparisonModels },
+			...input.workflow === void 0 ? {} : { workflow: input.workflow },
+			...input.projectId === void 0 ? {} : { projectId: input.projectId },
+			...input.projectName === void 0 ? {} : { projectName: input.projectName },
+			...input.slotKey === void 0 ? {} : { slotKey: input.slotKey },
+			...input.slotLabel === void 0 ? {} : { slotLabel: input.slotLabel }
+		}, ...await readIndex$1()];
+		const kept = merged.slice(0, 50);
+		for (const dropped of merged.slice(50)) await removeEntryFiles$1(dropped);
+		await writeIndex$1(kept);
+		return kept.map(toWire$1);
+	});
+}
+/** Remove one entry (and its image files). */
+async function removeHistory(id) {
+	return mutateHistory(async () => {
+		const previous = await readIndex$1();
+		const target = previous.find((entry) => entry.id === id);
+		if (target !== void 0) await removeEntryFiles$1(target);
+		const kept = previous.filter((entry) => entry.id !== id);
+		await writeIndex$1(kept);
+		return kept.map(toWire$1);
+	});
+}
+/** Remove every entry (and all image files). */
+async function clearHistory() {
+	return mutateHistory(async () => {
+		const previous = await readIndex$1();
+		for (const entry of previous) await removeEntryFiles$1(entry);
+		await writeIndex$1([]);
+		return [];
+	});
+}
+/** Read one stored image file by its (validated) file name. */
+async function readHistoryImage(file) {
+	if (!/^[a-zA-Z0-9][a-zA-Z0-9-]*-[0-9]+\.(png|jpg|jpeg|webp|gif)$/.test(file)) return void 0;
+	try {
+		return {
+			data: await promises.readFile(path.join(IMAGES_DIR$1, file)),
+			mime: mimeOfFile$2(file)
+		};
+	} catch {
+		return;
+	}
+}
+//#endregion
+//#region src/task-queue.ts
+/** In-memory, host-resident image generation queue. */
+var GenerationTaskQueue = class {
+	run;
+	concurrency;
+	tasks = [];
+	controllers = /* @__PURE__ */ new Map();
+	listeners = /* @__PURE__ */ new Set();
+	running = 0;
+	serialRunning = false;
+	constructor(run, concurrency = 1) {
+		this.run = run;
+		this.concurrency = concurrency;
+	}
+	list() {
+		return this.tasks.map((task) => this.snapshot(task));
+	}
+	/** Observe queue state changes. Listener failures never disrupt generation. */
+	subscribe(listener) {
+		this.listeners.add(listener);
+		return () => {
+			this.listeners.delete(listener);
+		};
+	}
+	submit(request) {
+		const task = {
+			id: randomUUID(),
+			request: { ...request },
+			status: "queued",
+			createdAt: Date.now()
+		};
+		this.tasks.unshift(task);
+		this.publish(task);
+		this.drain();
+		return this.snapshot(task);
+	}
+	cancel(id) {
+		const task = this.tasks.find((item) => item.id === id);
+		if (task === void 0 || task.status === "completed" || task.status === "failed" || task.status === "cancelled") return task;
+		task.status = "cancelled";
+		task.finishedAt = Date.now();
+		this.controllers.get(id)?.abort();
+		this.publish(task);
+		this.drain();
+		return this.snapshot(task);
+	}
+	retry(id) {
+		const previous = this.tasks.find((item) => item.id === id);
+		return previous === void 0 ? void 0 : this.submit(previous.request);
+	}
+	drain() {
+		while (this.running < Math.max(1, this.concurrency)) {
+			const task = this.tasks.find((item) => item.status === "queued" && (this.running === 0 || item.request.comparisonId !== void 0 && !this.serialRunning));
+			if (task === void 0) return;
+			this.running += 1;
+			if (task.request.comparisonId === void 0) this.serialRunning = true;
+			this.runTask(task).finally(() => {
+				this.running -= 1;
+				if (task.request.comparisonId === void 0) this.serialRunning = false;
+				this.drain();
+			});
+		}
+	}
+	async runTask(task) {
+		task.status = "running";
+		task.startedAt = Date.now();
+		this.publish(task);
+		const controller = new AbortController();
+		this.controllers.set(task.id, controller);
+		try {
+			const result = await this.run(task.request, controller.signal);
+			if (this.tasks.find((item) => item.id === task.id)?.status !== "cancelled") {
+				task.status = "completed";
+				task.result = result;
+				task.finishedAt = Date.now();
+				this.publish(task);
+			}
+		} catch (error) {
+			if (this.tasks.find((item) => item.id === task.id)?.status !== "cancelled") {
+				task.status = "failed";
+				task.error = error instanceof Error ? error.message : String(error);
+				task.finishedAt = Date.now();
+				this.publish(task);
+			}
+		} finally {
+			this.controllers.delete(task.id);
+		}
+	}
+	publish(task) {
+		const snapshot = this.snapshot(task);
+		for (const listener of this.listeners) try {
+			listener(snapshot);
+		} catch {}
+	}
+	snapshot(task) {
+		return {
+			...task,
+			request: { ...task.request },
+			...task.result === void 0 ? {} : { result: task.result }
+		};
+	}
+};
+//#endregion
+//#region src/generation-runtime.ts
+/**
+* Shared host-side generation runtime. Both the browser routes and Agent tools
+* submit to this one queue so persisted history and cancellation semantics stay
+* identical regardless of where a request originated.
+*
+* Requests carry a channel id (host-filled by the route/tool resolution); the
+* runtime picks that channel's upstream credentials, otherwise the default
+* channel, and records a channel snapshot on the history entry so usage
+* counters and filters survive channel deletion.
+*/
+var ImageGenerationRuntime = class {
+	resolve;
+	history;
+	queue;
+	constructor(resolve, history = { append: appendHistory }) {
+		this.resolve = resolve;
+		this.history = history;
+		this.queue = new GenerationTaskQueue((request, signal) => this.run(request, signal), 4);
+	}
+	async run(request, signal) {
+		const view = this.resolve();
+		const channel = view.channels.find((candidate) => candidate.id === request.channelId) ?? view.channels.find((candidate) => candidate.id === view.defaultChannelId) ?? view.channels[0];
+		if (channel === void 0) throw new ImageGenError("尚未配置任何渠道：请先在「设置 → 插件 → AI 生图」添加渠道并填写 API 地址与密钥", "no-channels");
+		const result = await generateImage({
+			apiUrl: channel.apiUrl,
+			apiKey: channel.apiKey
+		}, request, { signal });
+		try {
+			const history = await this.history.append({
+				id: randomUUID(),
+				createdAt: Date.now(),
+				mode: request.mode,
+				model: request.model,
+				prompt: request.prompt,
+				size: request.size,
+				quality: request.quality,
+				detail: request.detail,
+				n: request.n,
+				images: result.images,
+				...request.refName === void 0 ? {} : { refName: request.refName },
+				...request.channelId === void 0 ? {} : { channelId: request.channelId },
+				...request.channel === void 0 ? {} : { channel: request.channel },
+				...request.comparisonId === void 0 ? {} : { comparisonId: request.comparisonId },
+				...request.comparisonModels === void 0 ? {} : { comparisonModels: request.comparisonModels },
+				...request.workflow === void 0 ? {} : { workflow: request.workflow },
+				...request.projectId === void 0 ? {} : { projectId: request.projectId },
+				...request.projectName === void 0 ? {} : { projectName: request.projectName },
+				...request.slotKey === void 0 ? {} : { slotKey: request.slotKey },
+				...request.slotLabel === void 0 ? {} : { slotLabel: request.slotLabel }
+			});
+			return {
+				...result,
+				history
+			};
+		} catch (error) {
+			return {
+				...result,
+				historyError: error instanceof Error ? error.message : String(error)
+			};
+		}
+	}
+};
+//#endregion
+//#region src/gallery-store.ts
+/**
+* Host-persisted gallery (user-curated favorites): mirrors the history store
+* (image files + an index.json under ~/.dsh/dsh-imagegen/gallery/) but with no
+* size cap — every entry is an explicit user choice. Appends are deduplicated
+* by image content so adding the same generated image twice is a no-op.
+*
+* Framework-free (node:fs + node:crypto only) so the route layer can drive it
+* directly.
+*/
+const HISTORY_DIR = path.join(homedir(), ".dsh", "dsh-imagegen");
+const GALLERY_DIR = path.join(HISTORY_DIR, "gallery");
+const INDEX_PATH = path.join(GALLERY_DIR, "index.json");
+const IMAGES_DIR = path.join(GALLERY_DIR, "images");
+let pendingMutation = Promise.resolve();
+function mutateGallery(operation) {
 	const next = pendingMutation.then(operation, operation);
 	pendingMutation = next.then(() => void 0, () => void 0);
 	return next;
@@ -291,7 +1161,7 @@ function extensionOf(mime) {
 	}
 }
 /** MIME type for a stored image file name (image route responses). */
-function mimeOfFile(file) {
+function mimeOfFile$1(file) {
 	switch (path.extname(file).toLowerCase()) {
 		case ".jpg":
 		case ".jpeg": return "image/jpeg";
@@ -304,6 +1174,12 @@ function mimeOfFile(file) {
 function safeId(id) {
 	const cleaned = id.replace(/[^a-zA-Z0-9-]/g, "-");
 	return cleaned === "" ? "entry" : cleaned;
+}
+/** Short content fingerprint of the entry's first image. */
+function fingerprint(input) {
+	const first = input.images[0];
+	if (first === void 0) return void 0;
+	return createHash("sha1").update(first.b64).digest("hex");
 }
 /** Ensure the storage directories exist. */
 async function ensureDirs() {
@@ -334,7 +1210,7 @@ async function writeIndex(entries) {
 function isStoredEntry(value) {
 	if (value === null || typeof value !== "object") return false;
 	const entry = value;
-	return typeof entry.id === "string" && typeof entry.createdAt === "number" && (entry.mode === "text" || entry.mode === "edit") && typeof entry.prompt === "string" && Array.isArray(entry.images) && entry.images.every((image) => {
+	return typeof entry.id === "string" && typeof entry.createdAt === "number" && (entry.mode === "text" || entry.mode === "edit") && (entry.workflow === void 0 || entry.workflow === "ecommerce") && (entry.projectId === void 0 || typeof entry.projectId === "string") && (entry.projectName === void 0 || typeof entry.projectName === "string") && (entry.slotKey === void 0 || typeof entry.slotKey === "string") && (entry.slotLabel === void 0 || typeof entry.slotLabel === "string") && typeof entry.prompt === "string" && Array.isArray(entry.images) && entry.images.every((image) => {
 		if (image === null || typeof image !== "object") return false;
 		const record = image;
 		return typeof record.file === "string" && typeof record.mime === "string";
@@ -359,21 +1235,39 @@ function toWire(entry) {
 		detail: entry.detail,
 		n: entry.n,
 		images: entry.images.map((image) => ({
-			url: `/api/dsh-imagegen/history/image/${image.file}`,
+			url: `/api/dsh-imagegen/gallery/image/${image.file}`,
 			mime: image.mime,
 			...image.revisedPrompt === void 0 ? {} : { revisedPrompt: image.revisedPrompt }
 		})),
-		...entry.refName === void 0 ? {} : { refName: entry.refName }
+		...entry.refName === void 0 ? {} : { refName: entry.refName },
+		...entry.tags === void 0 ? {} : { tags: entry.tags },
+		...entry.channel === void 0 ? {} : { channel: entry.channel },
+		...entry.channelId === void 0 ? {} : { channelId: entry.channelId },
+		...entry.workflow === void 0 ? {} : { workflow: entry.workflow },
+		...entry.projectId === void 0 ? {} : { projectId: entry.projectId },
+		...entry.projectName === void 0 ? {} : { projectName: entry.projectName },
+		...entry.slotKey === void 0 ? {} : { slotKey: entry.slotKey },
+		...entry.slotLabel === void 0 ? {} : { slotLabel: entry.slotLabel }
 	};
 }
-/** List the persisted history, newest first, as wire entries. */
-async function listHistory() {
+/** List the persisted gallery, newest first, as wire entries. */
+async function listGallery() {
 	return (await readIndex()).map(toWire);
 }
-/** Append one generation, evicting the oldest beyond HISTORY_MAX. */
-async function appendHistory(input) {
-	return mutateHistory(async () => {
+/** Append one image to the gallery. Deduplicates by first-image content —
+*  appending an image already in the gallery returns `added: false` with the
+*  list unchanged. No size cap: every entry is an explicit user choice. */
+async function appendGallery(input) {
+	return mutateGallery(async () => {
 		await ensureDirs();
+		const hash = fingerprint(input);
+		if (hash !== void 0) {
+			const existing = await readIndex();
+			if (existing.some((entry) => entry.hash === hash)) return {
+				entries: existing.map(toWire),
+				added: false
+			};
+		}
 		const prefix = safeId(input.id);
 		const storedImages = [];
 		try {
@@ -402,17 +1296,26 @@ async function appendHistory(input) {
 			detail: input.detail,
 			n: input.n,
 			images: storedImages,
-			...input.refName === void 0 ? {} : { refName: input.refName }
+			...hash === void 0 ? {} : { hash },
+			...input.refName === void 0 ? {} : { refName: input.refName },
+			...input.channelId === void 0 ? {} : { channelId: input.channelId },
+			...input.channel === void 0 ? {} : { channel: input.channel },
+			...input.workflow === void 0 ? {} : { workflow: input.workflow },
+			...input.projectId === void 0 ? {} : { projectId: input.projectId },
+			...input.projectName === void 0 ? {} : { projectName: input.projectName },
+			...input.slotKey === void 0 ? {} : { slotKey: input.slotKey },
+			...input.slotLabel === void 0 ? {} : { slotLabel: input.slotLabel }
 		}, ...await readIndex()];
-		const kept = merged.slice(0, 50);
-		for (const dropped of merged.slice(50)) await removeEntryFiles(dropped);
-		await writeIndex(kept);
-		return kept.map(toWire);
+		await writeIndex(merged);
+		return {
+			entries: merged.map(toWire),
+			added: true
+		};
 	});
 }
 /** Remove one entry (and its image files). */
-async function removeHistory(id) {
-	return mutateHistory(async () => {
+async function removeGallery(id) {
+	return mutateGallery(async () => {
 		const previous = await readIndex();
 		const target = previous.find((entry) => entry.id === id);
 		if (target !== void 0) await removeEntryFiles(target);
@@ -421,9 +1324,20 @@ async function removeHistory(id) {
 		return kept.map(toWire);
 	});
 }
+/** Replace the user-managed labels for one gallery entry. */
+async function updateGalleryTags(id, tags) {
+	return mutateGallery(async () => {
+		const normalized = [...new Set(tags.map((tag) => tag.trim()).filter(Boolean))].slice(0, 20);
+		const entries = await readIndex();
+		const target = entries.find((entry) => entry.id === id);
+		if (target !== void 0) target.tags = normalized;
+		await writeIndex(entries);
+		return entries.map(toWire);
+	});
+}
 /** Remove every entry (and all image files). */
-async function clearHistory() {
-	return mutateHistory(async () => {
+async function clearGallery() {
+	return mutateGallery(async () => {
 		const previous = await readIndex();
 		for (const entry of previous) await removeEntryFiles(entry);
 		await writeIndex([]);
@@ -431,16 +1345,285 @@ async function clearHistory() {
 	});
 }
 /** Read one stored image file by its (validated) file name. */
-async function readHistoryImage(file) {
+async function readGalleryImage(file) {
 	if (!/^[a-zA-Z0-9][a-zA-Z0-9-]*-[0-9]+\.(png|jpg|jpeg|webp|gif)$/.test(file)) return void 0;
 	try {
 		return {
 			data: await promises.readFile(path.join(IMAGES_DIR, file)),
-			mime: mimeOfFile(file)
+			mime: mimeOfFile$1(file)
 		};
 	} catch {
 		return;
 	}
+}
+//#endregion
+//#region src/templates-store.ts
+/**
+* Prompt-template library store (awesome-gpt-image-2 mirror).
+*
+* The case list ships as a bundled snapshot (src/templates/cases.json, inside
+* the npm package) so the library works offline out of the box; a successful
+* manual refresh writes a runtime copy under ~/.dsh/dsh-imagegen/templates/
+* which then takes precedence. Reference images are not bundled (441 files,
+* ≈100 MB) — they are fetched from the vibeui.top mirror on demand, cached on
+* disk under ~/.dsh/dsh-imagegen/template-images/, and served from there on
+* every later view.
+*
+* Framework-free (node:fs only) so the route layer and tests can drive it
+* directly.
+*/
+/** Upstream mirror the library refreshes from (vibeui.top static mirror). */
+const SOURCE_URL = "https://vibeui.top/extra/awesome-gpt-image-2/data/cases.json";
+/** Remote image directory (file names come from the case list). */
+const IMAGE_BASE_URL = "https://vibeui.top/extra/awesome-gpt-image-2/data/images/";
+/** Category label map mirrored from vibeui.top's site.js (zh display names). */
+const CATEGORY_ZH = {
+	"Architecture & Spaces": "建筑与空间",
+	"Brand & Logos": "品牌与标志",
+	"Characters & People": "人物与角色",
+	"Charts & Infographics": "图表与信息可视化",
+	"Documents & Publishing": "文档与出版物",
+	"History & Classical Themes": "历史与古风题材",
+	"Illustration & Art": "插画与艺术",
+	"Other Use Cases": "其他应用场景",
+	"Photography & Realism": "摄影与写实",
+	"Posters & Typography": "海报与排版",
+	"Products & E-commerce": "商品与电商",
+	"Scenes & Storytelling": "场景与叙事",
+	"UI & Interfaces": "UI 与界面",
+	"Portraits & Fashion": "人像与时尚",
+	"Celebrities & Sports": "名人与运动",
+	"Characters & IP": "角色与 IP",
+	"Food & Beverage": "美食与饮品",
+	"Brand & Icons": "品牌与图标",
+	"Social Media & Stickers": "社媒与表情包",
+	"Infographics & Diagrams": "信息图与图解",
+	"UI & App Screens": "UI 与应用界面",
+	"Architecture & Interiors": "建筑与室内",
+	"Cinematic & Storytelling": "影视与叙事",
+	"Illustration & Comics": "插画与漫画",
+	"Historical & Fantasy": "历史与幻想",
+	"Animals & Nature": "动物与自然",
+	"Other Creative Uses": "其他创意用途"
+};
+const DATA_DIR = path.join(homedir(), ".dsh", "dsh-imagegen");
+const REFRESHED_CASES_PATH = path.join(DATA_DIR, "templates", "cases.json");
+const IMAGE_CACHE_DIR = path.join(DATA_DIR, "template-images");
+/**
+* Bundled snapshot path. The host bundle emits to lib/index.js while this
+* source file lives at src/templates-store.ts — both exactly one level below
+* the package root — so `../src/templates/cases.json` resolves to the shipped
+* snapshot in development and in the installed package alike.
+*/
+const BUNDLED_CASES_PATH = fileURLToPath(new URL("../src/templates/cases.json", import.meta.url));
+/** Budget for one upstream fetch (list refresh or one image). */
+const FETCH_TIMEOUT_MS = 6e4;
+/** Refuse to cache implausibly large "images". */
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+/** Strict reference-image file names this store writes and serves. */
+const IMAGE_FILE_PATTERN = /^case\d+\.(jpg|jpeg|png|webp|gif)$/i;
+/** In-memory memo of the active list (avoid re-parsing on every request). */
+let memo;
+/** Per-file in-flight downloads, so a gallery scroll never double-fetches. */
+const inflightImages = /* @__PURE__ */ new Map();
+/** Validate + normalize one raw upstream case; undefined when unusable. */
+function normalizeCase(raw) {
+	if (raw === null || typeof raw !== "object") return void 0;
+	const record = raw;
+	const id = Number(record.id);
+	const title = typeof record.title === "string" ? record.title.trim() : "";
+	const prompt = typeof record.prompt === "string" ? record.prompt.trim() : "";
+	if (!Number.isInteger(id) || title === "" || prompt === "") return void 0;
+	const category = typeof record.category === "string" ? record.category : "";
+	const image = imageFileOf(typeof record.image === "string" ? record.image : "");
+	return {
+		id,
+		title,
+		prompt,
+		category,
+		categoryZh: CATEGORY_ZH[category] ?? category,
+		styles: Array.isArray(record.styles) ? record.styles.map(String) : [],
+		scenes: Array.isArray(record.scenes) ? record.scenes.map(String) : [],
+		sourceLabel: typeof record.sourceLabel === "string" ? record.sourceLabel : "",
+		sourceUrl: typeof record.sourceUrl === "string" ? record.sourceUrl : "",
+		githubUrl: typeof record.githubUrl === "string" ? record.githubUrl : "",
+		image,
+		featured: record.featured === true
+	};
+}
+/** Extract the bare file name from an upstream image path. */
+function imageFileOf(value) {
+	const name = value.replace(/^\/+/, "").split("/").pop() ?? "";
+	return IMAGE_FILE_PATTERN.test(name) ? name : "";
+}
+/** Parse a snapshot payload (bundled, refreshed cache, or fresh download). */
+function parseSnapshot(payload) {
+	if (payload === null || typeof payload !== "object") return void 0;
+	const snapshot = payload;
+	if (!Array.isArray(snapshot.cases)) return void 0;
+	const cases = [];
+	for (const raw of snapshot.cases) {
+		const normalized = normalizeCase(raw);
+		if (normalized !== void 0) cases.push(normalized);
+	}
+	if (cases.length === 0) return void 0;
+	cases.sort((a, b) => b.id - a.id);
+	return {
+		cases,
+		repository: typeof snapshot.repository === "string" && snapshot.repository !== "" ? snapshot.repository : "freestylefly/awesome-gpt-image-2",
+		fetchedAt: typeof snapshot.fetchedAt === "string" && snapshot.fetchedAt !== "" ? snapshot.fetchedAt : ""
+	};
+}
+/** Read + parse a snapshot file; undefined when missing/corrupt. */
+async function readSnapshotFile(file) {
+	try {
+		return parseSnapshot(JSON.parse(await promises.readFile(file, "utf8")));
+	} catch {
+		return;
+	}
+}
+/**
+* The active template list: the refreshed runtime copy wins, the bundled
+* snapshot is the always-available fallback. Memoized; a successful refresh
+* replaces the memo.
+*/
+async function listTemplates() {
+	if (memo !== void 0) return memo;
+	const refreshed = await readSnapshotFile(REFRESHED_CASES_PATH);
+	if (refreshed !== void 0) {
+		memo = {
+			...refreshed,
+			total: refreshed.cases.length,
+			origin: "refreshed"
+		};
+		return memo;
+	}
+	const bundled = await readSnapshotFile(BUNDLED_CASES_PATH);
+	if (bundled !== void 0) {
+		memo = {
+			...bundled,
+			total: bundled.cases.length,
+			origin: "bundled"
+		};
+		return memo;
+	}
+	memo = {
+		cases: [],
+		total: 0,
+		origin: "bundled",
+		repository: "freestylefly/awesome-gpt-image-2",
+		fetchedAt: ""
+	};
+	return memo;
+}
+/**
+* Re-download the case list from the upstream mirror and persist it as the
+* runtime copy. Throws with a user-presentable message on failure; the
+* previous list (refreshed or bundled) stays active.
+*/
+async function refreshTemplates() {
+	let response;
+	try {
+		response = await fetch(SOURCE_URL, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+	} catch (error) {
+		throw new Error(`无法连接模板库源站：${error instanceof Error ? error.message : String(error)}`);
+	}
+	if (!response.ok) throw new Error(`模板库源站拒绝请求（HTTP ${response.status}）`);
+	let payload;
+	try {
+		payload = await response.json();
+	} catch {
+		throw new Error("模板库源站返回了非 JSON 响应");
+	}
+	const parsed = parseSnapshot(payload);
+	if (parsed === void 0) throw new Error("模板库源站数据格式无效");
+	const fetchedAt = (/* @__PURE__ */ new Date()).toISOString();
+	const snapshot = {
+		repository: parsed.repository,
+		sourceUrl: SOURCE_URL,
+		fetchedAt,
+		totalCases: parsed.cases.length,
+		cases: parsed.cases
+	};
+	await promises.mkdir(path.dirname(REFRESHED_CASES_PATH), { recursive: true });
+	const tmp = `${REFRESHED_CASES_PATH}.tmp-${process.pid}`;
+	await promises.writeFile(tmp, JSON.stringify(snapshot), "utf8");
+	await promises.rename(tmp, REFRESHED_CASES_PATH);
+	memo = {
+		cases: parsed.cases,
+		total: parsed.cases.length,
+		origin: "refreshed",
+		repository: parsed.repository,
+		fetchedAt
+	};
+	return {
+		total: parsed.cases.length,
+		fetchedAt
+	};
+}
+/** MIME type for a cached reference-image file name. */
+function mimeOfFile(file) {
+	switch (path.extname(file).toLowerCase()) {
+		case ".jpg":
+		case ".jpeg": return "image/jpeg";
+		case ".webp": return "image/webp";
+		case ".gif": return "image/gif";
+		default: return "image/png";
+	}
+}
+/** Download one reference image into the disk cache; undefined on failure. */
+async function fetchTemplateImage(file) {
+	let response;
+	try {
+		response = await fetch(`${IMAGE_BASE_URL}${encodeURIComponent(file)}`, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+	} catch {
+		return;
+	}
+	if (!response.ok) return void 0;
+	if (Number(response.headers.get("content-length") ?? 0) > MAX_IMAGE_BYTES) return void 0;
+	const data = Buffer.from(await response.arrayBuffer());
+	if (data.byteLength === 0 || data.byteLength > MAX_IMAGE_BYTES) return void 0;
+	const mime = mimeOfFile(file);
+	try {
+		await promises.mkdir(IMAGE_CACHE_DIR, { recursive: true });
+		const tmp = path.join(IMAGE_CACHE_DIR, `${file}.tmp-${process.pid}`);
+		await promises.writeFile(tmp, data);
+		await promises.rename(tmp, path.join(IMAGE_CACHE_DIR, file));
+	} catch {}
+	return {
+		data,
+		mime
+	};
+}
+/**
+* Read one reference image for the template library. Cache hit → disk; miss →
+* fetch from the upstream mirror, cache, and serve. Only file names present in
+* the active case list are served, so the route can never act as an open
+* proxy. Undefined when the name is unknown or the fetch failed.
+*/
+async function readTemplateImage(file) {
+	if (!IMAGE_FILE_PATTERN.test(file) || file.includes("..")) return void 0;
+	if (!(await listTemplates()).cases.some((entry) => entry.image === file)) return void 0;
+	const cached = path.join(IMAGE_CACHE_DIR, file);
+	try {
+		return {
+			data: await promises.readFile(cached),
+			mime: mimeOfFile(file)
+		};
+	} catch {}
+	const inflight = inflightImages.get(file);
+	if (inflight !== void 0) return inflight;
+	const pending = fetchTemplateImage(file);
+	inflightImages.set(file, pending);
+	try {
+		return await pending;
+	} finally {
+		inflightImages.delete(file);
+	}
+}
+/** Drop the in-memory list memo (tests). */
+function clearTemplateMemo() {
+	memo = void 0;
 }
 //#endregion
 //#region src/updater.ts
@@ -543,93 +1726,62 @@ function clearUpdateCache() {
 	cached = void 0;
 }
 //#endregion
-//#region src/profiles-store.ts
-/** Host-side persistence for selectable image-generation profiles. */
-const DIR = path.join(homedir(), ".dsh", "dsh-imagegen");
-const FILE = path.join(DIR, "profiles.json");
-let tail = Promise.resolve();
-function serialize(operation) {
-	const next = tail.then(operation, operation);
-	tail = next.then(() => void 0, () => void 0);
-	return next;
-}
-function valid(value) {
-	if (value === null || typeof value !== "object") return false;
-	const p = value;
-	return typeof p.id === "string" && typeof p.name === "string" && typeof p.apiUrl === "string" && typeof p.model === "string" && typeof p.apiKey === "string";
-}
-async function readAll() {
-	try {
-		const parsed = JSON.parse(await promises.readFile(FILE, "utf8"));
-		return parsed !== null && typeof parsed === "object" && Array.isArray(parsed.profiles) ? parsed.profiles.filter(valid) : [];
-	} catch {
-		return [];
+//#region src/presets.ts
+const IMAGE_PRESETS = [
+	{
+		id: "volc-ark-seedream",
+		name: "字节 · 火山方舟（Seedream）",
+		apiUrl: "https://ark.cn-beijing.volces.com/api/v3",
+		hint: "字节跳动官方 Seedream 文生图/图生图入口",
+		models: [
+			{
+				alias: "seedream-5.0-pro",
+				id: "seedream-5.0-pro"
+			},
+			{
+				alias: "seedream-5.0",
+				id: "seedream-5.0"
+			},
+			{
+				alias: "seedream-4.0",
+				id: "seedream-4.0"
+			}
+		]
+	},
+	{
+		id: "openai-official",
+		name: "OpenAI 官方",
+		apiUrl: "https://api.openai.com/v1",
+		hint: "OpenAI 官方图像生成接口",
+		models: [{
+			alias: "gpt-image-2",
+			id: "gpt-image-2"
+		}]
+	},
+	{
+		id: "zhipu-official",
+		name: "智谱 AI 官方",
+		apiUrl: "https://open.bigmodel.cn/api/paas/v4",
+		hint: "智谱官方 GLM-Image 图像生成接口",
+		models: [{
+			alias: "glm-image",
+			id: "glm-image"
+		}]
+	},
+	{
+		id: "xai-grok",
+		name: "xAI（Grok）",
+		apiUrl: "https://api.x.ai/v1",
+		hint: "xAI 官方接口：Grok Imagine 系列",
+		models: [{
+			alias: "grok-imagine-image",
+			id: "grok-imagine-image"
+		}]
 	}
-}
-async function writeAll(profiles) {
-	await promises.mkdir(DIR, { recursive: true });
-	await promises.writeFile(FILE, JSON.stringify({ profiles }, null, 2), "utf8");
-}
-function publicProfile(profile) {
-	return {
-		id: profile.id,
-		name: profile.name,
-		apiUrl: profile.apiUrl,
-		model: profile.model,
-		keySet: profile.apiKey.trim() !== ""
-	};
-}
-/** Migrate the old single endpoint/key into one selectable profile once. */
-async function ensureLegacyProfile(legacy) {
-	return serialize(async () => {
-		let profiles = await readAll();
-		if (profiles.length === 0 && (legacy.apiUrl.trim() !== "" || legacy.apiKey.trim() !== "")) {
-			profiles = [{
-				id: "legacy-default",
-				name: "默认配置",
-				apiUrl: legacy.apiUrl.trim(),
-				model: "fal-ai/gpt-image-2",
-				apiKey: legacy.apiKey
-			}];
-			await writeAll(profiles);
-		}
-		return profiles.map(publicProfile);
-	});
-}
-async function saveProfile(input, legacy) {
-	return serialize(async () => {
-		let profiles = await readAll();
-		const id = input.id?.trim() || randomUUID();
-		const existing = profiles.find((profile) => profile.id === id);
-		const apiKey = input.apiKey?.trim() || existing?.apiKey || (profiles.length === 0 ? legacy?.apiKey ?? "" : "");
-		const profile = {
-			id,
-			name: input.name.trim() || "默认配置",
-			apiUrl: input.apiUrl.trim(),
-			model: input.model.trim() || "fal-ai/gpt-image-2",
-			apiKey
-		};
-		profiles = existing === void 0 ? [...profiles, profile] : profiles.map((item) => item.id === id ? profile : item);
-		await writeAll(profiles);
-		return profiles.map(publicProfile);
-	});
-}
-async function removeProfile(id) {
-	return serialize(async () => {
-		const profiles = (await readAll()).filter((profile) => profile.id !== id);
-		await writeAll(profiles);
-		return profiles.map(publicProfile);
-	});
-}
-async function resolveProfile(id, legacy) {
-	const profiles = await readAll();
-	const selected = id === void 0 ? void 0 : profiles.find((profile) => profile.id === id);
-	if (selected !== void 0) return {
-		apiUrl: selected.apiUrl,
-		apiKey: selected.apiKey,
-		model: selected.model
-	};
-	return legacy;
+];
+/** Look up one built-in provider by id. */
+function presetById(id) {
+	return IMAGE_PRESETS.find((preset) => preset.id === id);
 }
 //#endregion
 //#region src/routes.ts
@@ -689,6 +1841,30 @@ async function readJsonBody(req, maxBytes = MAX_JSON_BODY_BYTES) {
 function messageOf(error) {
 	return error instanceof Error ? error.message : String(error);
 }
+function parseGenerateRequest(body) {
+	const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+	if (prompt === "") return void 0;
+	const comparisonModels = Array.isArray(body.comparisonModels) ? [...new Set(body.comparisonModels.filter((model) => typeof model === "string").map((model) => model.trim()).filter(Boolean))] : [];
+	return {
+		mode: body.mode === "edit" ? "edit" : "text",
+		model: typeof body.model === "string" ? body.model : "",
+		prompt,
+		size: typeof body.size === "string" ? body.size : "auto",
+		quality: typeof body.quality === "string" ? body.quality : "auto",
+		n: typeof body.n === "number" ? body.n : 1,
+		detail: typeof body.detail === "string" ? body.detail : "",
+		...typeof body.image === "string" && body.image !== "" ? { image: body.image } : {},
+		...typeof body.refName === "string" && body.refName !== "" ? { refName: body.refName } : {},
+		...typeof body.channelId === "string" && body.channelId !== "" ? { channelId: body.channelId } : {},
+		...typeof body.comparisonId === "string" && body.comparisonId !== "" ? { comparisonId: body.comparisonId } : {},
+		...comparisonModels.length > 1 ? { comparisonModels } : {},
+		...body.workflow === "ecommerce" ? { workflow: "ecommerce" } : {},
+		...typeof body.projectId === "string" && body.projectId !== "" ? { projectId: body.projectId } : {},
+		...typeof body.projectName === "string" && body.projectName !== "" ? { projectName: body.projectName } : {},
+		...typeof body.slotKey === "string" && body.slotKey !== "" ? { slotKey: body.slotKey } : {},
+		...typeof body.slotLabel === "string" && body.slotLabel !== "" ? { slotLabel: body.slotLabel } : {}
+	};
+}
 /** Validate a submitted history entry (images carry base64). */
 function parseHistoryEntryInput(body) {
 	const raw = body.entry;
@@ -711,6 +1887,7 @@ function parseHistoryEntryInput(body) {
 			...typeof image.revisedPrompt === "string" ? { revisedPrompt: image.revisedPrompt } : {}
 		});
 	}
+	const comparisonModels = Array.isArray(entry.comparisonModels) ? [...new Set(entry.comparisonModels.filter((model) => typeof model === "string").map((model) => model.trim()).filter(Boolean))] : [];
 	return {
 		id: entry.id,
 		createdAt: entry.createdAt,
@@ -722,7 +1899,16 @@ function parseHistoryEntryInput(body) {
 		detail: entry.detail,
 		n: entry.n,
 		images,
-		...typeof entry.refName === "string" ? { refName: entry.refName } : {}
+		...typeof entry.refName === "string" ? { refName: entry.refName } : {},
+		...typeof entry.channelId === "string" ? { channelId: entry.channelId } : {},
+		...typeof entry.channel === "string" ? { channel: entry.channel } : {},
+		...typeof entry.comparisonId === "string" ? { comparisonId: entry.comparisonId } : {},
+		...comparisonModels.length > 1 ? { comparisonModels } : {},
+		...entry.workflow === "ecommerce" ? { workflow: "ecommerce" } : {},
+		...typeof entry.projectId === "string" ? { projectId: entry.projectId } : {},
+		...typeof entry.projectName === "string" ? { projectName: entry.projectName } : {},
+		...typeof entry.slotKey === "string" ? { slotKey: entry.slotKey } : {},
+		...typeof entry.slotLabel === "string" ? { slotLabel: entry.slotLabel } : {}
 	};
 }
 /** Extract the image file name from a history-image request URL. */
@@ -736,6 +1922,42 @@ function imageFileFrom(rawUrl, basePath) {
 	}
 	if (!pathname.startsWith(`${basePath}/`)) return void 0;
 	return decodeURIComponent(pathname.slice(basePath.length + 1));
+}
+/** Parse the durable image reference carried by an Agent tool-result view. */
+function agentImageRefFrom(rawUrl) {
+	if (rawUrl === void 0) return void 0;
+	let url;
+	try {
+		url = new URL(rawUrl, "http://localhost");
+	} catch {
+		return;
+	}
+	if (url.pathname !== "/api/dsh-imagegen/agent-image") return void 0;
+	const attachmentId = url.searchParams.get("attachment_id") ?? "";
+	const mediaType = url.searchParams.get("media_type") ?? "";
+	const bytes = Number(url.searchParams.get("bytes"));
+	const width = Number(url.searchParams.get("width"));
+	const height = Number(url.searchParams.get("height"));
+	if (attachmentId === "" || !isImageMediaType(mediaType) || !Number.isSafeInteger(bytes) || bytes < 1 || !Number.isSafeInteger(width) || width < 1 || !Number.isSafeInteger(height) || height < 1) return void 0;
+	return {
+		attachmentId,
+		mediaType,
+		bytes,
+		width,
+		height
+	};
+}
+function isImageMediaType(value) {
+	return value === "image/png" || value === "image/jpeg" || value === "image/webp" || value === "image/gif";
+}
+function imageDataUrl$1(value) {
+	const match = /^data:(image\/(?:png|jpeg|webp|gif));base64,(.*)$/su.exec(value.trim());
+	if (match === null || match[1] === void 0 || match[2] === void 0) return void 0;
+	const data = Buffer.from(match[2], "base64");
+	return data.byteLength === 0 ? void 0 : {
+		mediaType: match[1],
+		data
+	};
 }
 /** Project one settings descriptor onto the bridge wire view. */
 function toView(descriptor) {
@@ -778,6 +2000,104 @@ function makeRoutes(deps) {
 		clear: clearHistory,
 		readImage: readHistoryImage
 	};
+	const gallery = deps.gallery ?? {
+		list: listGallery,
+		append: appendGallery,
+		remove: removeGallery,
+		clear: clearGallery,
+		updateTags: updateGalleryTags,
+		readImage: readGalleryImage
+	};
+	const templates = deps.templates ?? {
+		list: listTemplates,
+		refresh: refreshTemplates,
+		readImage: readTemplateImage
+	};
+	const resolvePrompt = deps.resolvePrompt ?? (() => ({
+		apiUrl: "",
+		apiKey: "",
+		model: ""
+	}));
+	const resolveImageModels = deps.resolveImageModels ?? (() => normalizeImageModels(void 0));
+	/** The current channel view: the channel-aware resolver, or a synthesized
+	*  single default channel from the legacy flat upstream config (tests and
+	*  older hosts). */
+	const channelViewOf = () => {
+		if (deps.resolveChannels !== void 0) return deps.resolveChannels();
+		const upstream = deps.resolve();
+		const models = normalizeImageModels(resolveImageModels()).map((id) => ({
+			alias: id,
+			id
+		}));
+		if (upstream.apiUrl.trim() === "" && models.length === 0) return {
+			channels: [],
+			defaultChannelId: ""
+		};
+		return {
+			channels: [{
+				id: "default",
+				preset: "",
+				name: "默认渠道",
+				apiUrl: upstream.apiUrl,
+				apiKey: upstream.apiKey,
+				models
+			}],
+			defaultChannelId: "default"
+		};
+	};
+	const runtime = deps.runtime ?? new ImageGenerationRuntime(channelViewOf, history);
+	/** Resolve an alias (or the channel fallback) into a concrete generation
+	*  request: picks the channel (explicit then default), maps alias → upstream
+	*  id, and fills the channel snapshot kept on history entries. */
+	const resolveChannelRequest = (request) => {
+		const view = channelViewOf();
+		if (view.channels.length === 0) return {
+			ok: false,
+			code: "no-channels",
+			message: "尚未配置任何渠道：请先在「设置 → 插件 → AI 生图」添加渠道并填写 API 地址与密钥"
+		};
+		const explicit = view.channels.find((candidate) => candidate.id === request.channelId);
+		const defaults = view.channels.find((candidate) => candidate.id === view.defaultChannelId) ?? view.channels[0];
+		const target = explicit ?? defaults;
+		const asked = request.model.trim();
+		if (asked === "") {
+			const alias = target?.models[0]?.alias ?? "";
+			if (alias === "") return {
+				ok: false,
+				code: "no-models",
+				message: `渠道「${target?.name ?? ""}」尚未配置模型，请先在设置中添加`
+			};
+			const mapping = target.models.find((model) => model.alias === alias);
+			return {
+				ok: true,
+				request: {
+					...request,
+					model: alias,
+					upstream: mapping.id,
+					channelId: target.id,
+					channel: target.name
+				}
+			};
+		}
+		const hosting = view.channels.filter((channel) => channel.models.some((model) => model.alias === asked));
+		if (hosting.length === 0) return {
+			ok: false,
+			code: "image-model-not-configured",
+			message: `模型「${asked}」未在任一渠道配置；可用模型：${[...new Set(view.channels.flatMap((channel) => channel.models.map((model) => model.alias)))].join("、") || "（无）"}`
+		};
+		const picked = target !== void 0 && target.models.some((model) => model.alias === asked) ? target : hosting[0];
+		const mapping = picked.models.find((model) => model.alias === asked);
+		return {
+			ok: true,
+			request: {
+				...request,
+				model: asked,
+				upstream: mapping.id,
+				channelId: picked.id,
+				channel: picked.name
+			}
+		};
+	};
 	const guard = (req, res, method) => {
 		if (!isLoopbackRequest(req)) {
 			writeJson(res, 403, { error: "forbidden: loopback-only" });
@@ -790,93 +2110,187 @@ function makeRoutes(deps) {
 		return true;
 	};
 	return [
-		{
+		...deps.attachments?.saveImage === void 0 || deps.pendingConversationImages === void 0 ? [] : [{
 			kind: "exact",
-			path: PROFILES_API.list,
+			path: CONVERSATION_IMAGE_API,
 			handler: async (req, res) => {
 				if (!guard(req, res, "POST")) return;
-				try {
-					writeJson(res, 200, {
-						ok: true,
-						profiles: await ensureLegacyProfile(deps.resolve())
-					});
-				} catch (error) {
-					writeJson(res, 200, {
-						ok: false,
-						code: "profiles-failed",
-						message: messageOf(error)
-					});
-				}
-			}
-		},
-		{
-			kind: "exact",
-			path: PROFILES_API.save,
-			handler: async (req, res) => {
-				if (!guard(req, res, "POST")) return;
-				const raw = (await readJsonBody(req))?.profile;
-				if (raw === null || typeof raw !== "object") {
+				const body = await readJsonBody(req, MAX_JSON_BODY_BYTES);
+				const sessionId = typeof body?.sessionId === "string" ? body.sessionId.trim() : "";
+				const dataUrl = typeof body?.dataUrl === "string" ? imageDataUrl$1(body.dataUrl) : void 0;
+				if (sessionId === "" || dataUrl === void 0) {
 					writeJson(res, 200, {
 						ok: false,
 						code: "bad-request",
-						message: "profile is required"
-					});
-					return;
-				}
-				const value = raw;
-				const input = {
-					...typeof value.id === "string" ? { id: value.id } : {},
-					name: typeof value.name === "string" ? value.name : "",
-					apiUrl: typeof value.apiUrl === "string" ? value.apiUrl : "",
-					model: typeof value.model === "string" ? value.model : "",
-					...typeof value.apiKey === "string" ? { apiKey: value.apiKey } : {}
-				};
-				if (input.name.trim() === "" || input.apiUrl.trim() === "" || input.model.trim() === "") {
-					writeJson(res, 200, {
-						ok: false,
-						code: "bad-request",
-						message: "name, apiUrl and model are required"
+						message: "sessionId and image data are required"
 					});
 					return;
 				}
 				try {
-					writeJson(res, 200, {
-						ok: true,
-						profiles: await saveProfile(input, deps.resolve())
+					const ref = await deps.attachments.saveImage({
+						data: dataUrl.data,
+						mediaType: dataUrl.mediaType,
+						...typeof body?.name === "string" && body.name.trim() !== "" ? { name: body.name.trim() } : {}
 					});
+					deps.pendingConversationImages.set(sessionId, ref);
+					writeJson(res, 200, { ok: true });
 				} catch (error) {
 					writeJson(res, 200, {
 						ok: false,
-						code: "profiles-failed",
+						code: "image-save-failed",
 						message: messageOf(error)
 					});
 				}
 			}
-		},
+		}],
+		...deps.attachments === void 0 ? [] : [{
+			kind: "prefix",
+			path: AGENT_IMAGE_API,
+			handler: async (req, res) => {
+				if (!isLoopbackRequest(req)) {
+					writeJson(res, 403, { error: "forbidden: loopback-only" });
+					return;
+				}
+				if (req.method !== "GET") {
+					writeJson(res, 405, { error: `method not allowed: ${req.method}` });
+					return;
+				}
+				const ref = agentImageRefFrom(req.url);
+				if (ref === void 0) {
+					writeJson(res, 400, { error: "invalid image reference" });
+					return;
+				}
+				try {
+					const stored = await deps.attachments.readImage(ref);
+					res.writeHead(200, {
+						"content-type": stored.ref.mediaType,
+						"content-length": stored.data.byteLength,
+						"cache-control": "private, max-age=3600"
+					});
+					res.end(Buffer.from(stored.data));
+				} catch {
+					writeJson(res, 404, { error: "image attachment not found" });
+				}
+			}
+		}],
 		{
 			kind: "exact",
-			path: PROFILES_API.remove,
+			path: IMAGE_MODEL_API.models,
 			handler: async (req, res) => {
 				if (!guard(req, res, "POST")) return;
 				const body = await readJsonBody(req);
-				const id = typeof body?.id === "string" ? body.id.trim() : "";
-				if (id === "") {
+				const view = channelViewOf();
+				const stored = view.channels.find((candidate) => candidate.id === (typeof body?.channelId === "string" ? body.channelId : void 0)) ?? view.channels.find((candidate) => candidate.id === view.defaultChannelId) ?? view.channels[0];
+				const upstream = {
+					apiUrl: typeof body?.apiUrl === "string" && body.apiUrl.trim() !== "" ? body.apiUrl.trim() : stored?.apiUrl ?? "",
+					apiKey: typeof body?.apiKey === "string" && body.apiKey.trim() !== "" ? body.apiKey.trim() : stored?.apiKey ?? ""
+				};
+				try {
+					writeJson(res, 200, {
+						ok: true,
+						models: await listImageModels(upstream)
+					});
+				} catch (error) {
+					writeJson(res, 200, {
+						ok: false,
+						code: "image-models-failed",
+						message: messageOf(error)
+					});
+				}
+			}
+		},
+		{
+			kind: "exact",
+			path: PRESETS_API,
+			handler: async (req, res) => {
+				if (!guard(req, res, "POST")) return;
+				writeJson(res, 200, {
+					ok: true,
+					presets: IMAGE_PRESETS.map((preset) => ({
+						id: preset.id,
+						name: preset.name,
+						apiUrl: preset.apiUrl,
+						hint: preset.hint,
+						models: preset.models
+					}))
+				});
+			}
+		},
+		{
+			kind: "exact",
+			path: USAGE_API,
+			handler: async (req, res) => {
+				if (!guard(req, res, "POST")) return;
+				try {
+					const entries = [...await history.list(), ...await gallery.list()];
+					const byChannel = {};
+					const totals = {};
+					for (const entry of entries) {
+						const channelKey = entry.channelId !== void 0 ? entry.channelId : entry.channel !== void 0 ? `name:${entry.channel}` : "";
+						const alias = entry.model;
+						const bucket = byChannel[channelKey] ?? (byChannel[channelKey] = {});
+						bucket[alias] = (bucket[alias] ?? 0) + 1;
+						totals[alias] = (totals[alias] ?? 0) + 1;
+					}
+					writeJson(res, 200, {
+						ok: true,
+						usage: {
+							byChannel,
+							totals
+						}
+					});
+				} catch (error) {
+					writeJson(res, 200, {
+						ok: false,
+						code: "usage-failed",
+						message: messageOf(error)
+					});
+				}
+			}
+		},
+		{
+			kind: "exact",
+			path: PROMPT_ENHANCE_API.models,
+			handler: async (req, res) => {
+				if (!guard(req, res, "POST")) return;
+				try {
+					writeJson(res, 200, {
+						ok: true,
+						models: await listPromptModels(resolvePrompt())
+					});
+				} catch (error) {
+					writeJson(res, 200, {
+						ok: false,
+						code: "prompt-models-failed",
+						message: messageOf(error)
+					});
+				}
+			}
+		},
+		{
+			kind: "exact",
+			path: PROMPT_ENHANCE_API.enhance,
+			handler: async (req, res) => {
+				if (!guard(req, res, "POST")) return;
+				const body = await readJsonBody(req);
+				const prompt = typeof body?.prompt === "string" ? body.prompt.trim() : "";
+				if (prompt === "") {
 					writeJson(res, 200, {
 						ok: false,
 						code: "bad-request",
-						message: "profile id is required"
+						message: "prompt is required"
 					});
 					return;
 				}
 				try {
 					writeJson(res, 200, {
 						ok: true,
-						profiles: await removeProfile(id)
+						prompt: await enhancePrompt(resolvePrompt(), prompt)
 					});
 				} catch (error) {
 					writeJson(res, 200, {
 						ok: false,
-						code: "profiles-failed",
+						code: "prompt-enhance-failed",
 						message: messageOf(error)
 					});
 				}
@@ -922,7 +2336,7 @@ function makeRoutes(deps) {
 				}
 				const expectedRevision = typeof body.expectedRevision === "number" ? body.expectedRevision : void 0;
 				try {
-					await deps.settings.mutate(settingsNamespace(ns), body.ops, expectedRevision);
+					await deps.settings.mutate(ns, body.ops, expectedRevision);
 				} catch (error) {
 					writeJson(res, 200, failureOf(error));
 					return;
@@ -948,16 +2362,8 @@ function makeRoutes(deps) {
 			handler: async (req, res) => {
 				if (!guard(req, res, "POST")) return;
 				const body = await readJsonBody(req);
-				if (body === void 0) {
-					writeJson(res, 200, {
-						ok: false,
-						code: "bad-request",
-						message: "unreadable JSON body"
-					});
-					return;
-				}
-				const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
-				if (prompt === "") {
+				const parsed = body === void 0 ? void 0 : parseGenerateRequest(body);
+				if (parsed === void 0) {
 					writeJson(res, 200, {
 						ok: false,
 						code: "bad-request",
@@ -965,57 +2371,20 @@ function makeRoutes(deps) {
 					});
 					return;
 				}
-				if (prompt.length > 2e3) {
+				const resolved = resolveChannelRequest(parsed);
+				if (!resolved.ok) {
 					writeJson(res, 200, {
 						ok: false,
-						code: "bad-request",
-						message: "prompt exceeds 2000 characters"
+						code: resolved.code,
+						message: resolved.message
 					});
 					return;
 				}
-				const profileId = typeof body.profileId === "string" ? body.profileId.trim() : void 0;
-				const request = {
-					mode: body.mode === "edit" ? "edit" : "text",
-					...profileId === void 0 || profileId === "" ? {} : { profileId },
-					model: typeof body.model === "string" ? body.model : "fal-ai/gpt-image-2",
-					prompt,
-					size: typeof body.size === "string" ? body.size : "auto",
-					quality: typeof body.quality === "string" ? body.quality : "auto",
-					n: typeof body.n === "number" ? body.n : 1,
-					detail: typeof body.detail === "string" ? body.detail : "",
-					...typeof body.image === "string" && body.image !== "" ? { image: body.image } : {},
-					...typeof body.refName === "string" && body.refName !== "" ? { refName: body.refName } : {}
-				};
 				try {
-					const upstream = await resolveProfile(request.profileId, deps.resolve());
-					if (upstream.model !== void 0 && (typeof body.model !== "string" || body.model.trim() === "")) request.model = upstream.model;
-					const result = await generateImage(upstream, request);
-					try {
-						const entries = await history.append({
-							id: randomUUID(),
-							createdAt: Date.now(),
-							mode: request.mode,
-							model: request.model,
-							prompt: request.prompt,
-							size: request.size,
-							quality: request.quality,
-							detail: request.detail,
-							n: request.n,
-							images: result.images,
-							...request.refName === void 0 ? {} : { refName: request.refName }
-						});
-						writeJson(res, 200, {
-							ok: true,
-							...result,
-							history: entries
-						});
-					} catch (error) {
-						writeJson(res, 200, {
-							ok: true,
-							...result,
-							historyError: messageOf(error)
-						});
-					}
+					writeJson(res, 200, {
+						ok: true,
+						...await runtime.run(resolved.request)
+					});
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
 					writeJson(res, 200, {
@@ -1024,6 +2393,89 @@ function makeRoutes(deps) {
 						message
 					});
 				}
+			}
+		},
+		{
+			kind: "exact",
+			path: TASK_API.submit,
+			handler: async (req, res) => {
+				if (!guard(req, res, "POST")) return;
+				const body = await readJsonBody(req);
+				const parsed = body === void 0 ? void 0 : parseGenerateRequest(body);
+				if (parsed === void 0) {
+					writeJson(res, 200, {
+						ok: false,
+						code: "bad-request",
+						message: "prompt is required"
+					});
+					return;
+				}
+				const resolved = resolveChannelRequest(parsed);
+				if (!resolved.ok) {
+					writeJson(res, 200, {
+						ok: false,
+						code: resolved.code,
+						message: resolved.message
+					});
+					return;
+				}
+				writeJson(res, 200, {
+					ok: true,
+					task: runtime.queue.submit(resolved.request)
+				});
+			}
+		},
+		{
+			kind: "exact",
+			path: TASK_API.list,
+			handler: async (req, res) => {
+				if (!guard(req, res, "POST")) return;
+				writeJson(res, 200, {
+					ok: true,
+					tasks: runtime.queue.list()
+				});
+			}
+		},
+		{
+			kind: "exact",
+			path: TASK_API.cancel,
+			handler: async (req, res) => {
+				if (!guard(req, res, "POST")) return;
+				const body = await readJsonBody(req);
+				const task = typeof body?.id === "string" ? runtime.queue.cancel(body.id) : void 0;
+				if (task === void 0) {
+					writeJson(res, 200, {
+						ok: false,
+						code: "not-found",
+						message: "task not found"
+					});
+					return;
+				}
+				writeJson(res, 200, {
+					ok: true,
+					task
+				});
+			}
+		},
+		{
+			kind: "exact",
+			path: TASK_API.retry,
+			handler: async (req, res) => {
+				if (!guard(req, res, "POST")) return;
+				const body = await readJsonBody(req);
+				const task = typeof body?.id === "string" ? runtime.queue.retry(body.id) : void 0;
+				if (task === void 0) {
+					writeJson(res, 200, {
+						ok: false,
+						code: "not-found",
+						message: "task not found"
+					});
+					return;
+				}
+				writeJson(res, 200, {
+					ok: true,
+					task
+				});
 			}
 		},
 		{
@@ -1219,30 +2671,880 @@ function makeRoutes(deps) {
 				});
 				res.end(found.data);
 			}
+		},
+		{
+			kind: "exact",
+			path: GALLERY_API.list,
+			handler: async (req, res) => {
+				if (!guard(req, res, "POST")) return;
+				try {
+					writeJson(res, 200, {
+						ok: true,
+						entries: await gallery.list()
+					});
+				} catch (error) {
+					writeJson(res, 200, {
+						ok: false,
+						code: "gallery-failed",
+						message: messageOf(error)
+					});
+				}
+			}
+		},
+		{
+			kind: "exact",
+			path: GALLERY_API.append,
+			handler: async (req, res) => {
+				if (!guard(req, res, "POST")) return;
+				const body = await readJsonBody(req, MAX_HISTORY_BODY_BYTES);
+				if (body === void 0) {
+					writeJson(res, 200, {
+						ok: false,
+						code: "bad-request",
+						message: "unreadable JSON body"
+					});
+					return;
+				}
+				const entry = parseHistoryEntryInput(body);
+				if (entry === void 0) {
+					writeJson(res, 200, {
+						ok: false,
+						code: "bad-request",
+						message: "malformed gallery entry"
+					});
+					return;
+				}
+				try {
+					const result = await gallery.append({
+						...entry,
+						id: randomUUID()
+					});
+					writeJson(res, 200, {
+						ok: true,
+						entries: result.entries,
+						added: result.added
+					});
+				} catch (error) {
+					writeJson(res, 200, {
+						ok: false,
+						code: "gallery-failed",
+						message: messageOf(error)
+					});
+				}
+			}
+		},
+		{
+			kind: "exact",
+			path: GALLERY_API.remove,
+			handler: async (req, res) => {
+				if (!guard(req, res, "POST")) return;
+				const body = await readJsonBody(req);
+				const id = body !== void 0 && typeof body.id === "string" ? body.id : "";
+				if (id === "") {
+					writeJson(res, 200, {
+						ok: false,
+						code: "bad-request",
+						message: "gallery id is required"
+					});
+					return;
+				}
+				try {
+					writeJson(res, 200, {
+						ok: true,
+						entries: await gallery.remove(id)
+					});
+				} catch (error) {
+					writeJson(res, 200, {
+						ok: false,
+						code: "gallery-failed",
+						message: messageOf(error)
+					});
+				}
+			}
+		},
+		{
+			kind: "exact",
+			path: GALLERY_API.tags,
+			handler: async (req, res) => {
+				if (!guard(req, res, "POST")) return;
+				const body = await readJsonBody(req);
+				const id = typeof body?.id === "string" ? body.id : "";
+				const tags = Array.isArray(body?.tags) ? body.tags.filter((tag) => typeof tag === "string") : void 0;
+				if (id === "" || tags === void 0 || gallery.updateTags === void 0) {
+					writeJson(res, 200, {
+						ok: false,
+						code: "bad-request",
+						message: "gallery id and tags are required"
+					});
+					return;
+				}
+				try {
+					writeJson(res, 200, {
+						ok: true,
+						entries: await gallery.updateTags(id, tags)
+					});
+				} catch (error) {
+					writeJson(res, 200, {
+						ok: false,
+						code: "gallery-failed",
+						message: messageOf(error)
+					});
+				}
+			}
+		},
+		{
+			kind: "exact",
+			path: GALLERY_API.clear,
+			handler: async (req, res) => {
+				if (!guard(req, res, "POST")) return;
+				try {
+					writeJson(res, 200, {
+						ok: true,
+						entries: await gallery.clear()
+					});
+				} catch (error) {
+					writeJson(res, 200, {
+						ok: false,
+						code: "gallery-failed",
+						message: messageOf(error)
+					});
+				}
+			}
+		},
+		{
+			kind: "prefix",
+			path: GALLERY_API.image,
+			handler: async (req, res) => {
+				if (!isLoopbackRequest(req)) {
+					writeJson(res, 403, { error: "forbidden: loopback-only" });
+					return;
+				}
+				if (req.method !== "GET") {
+					writeJson(res, 405, { error: `method not allowed: ${req.method}` });
+					return;
+				}
+				const file = imageFileFrom(req.url, GALLERY_API.image);
+				if (file === void 0) {
+					writeJson(res, 404, { error: "not found" });
+					return;
+				}
+				const found = await gallery.readImage(file);
+				if (found === void 0) {
+					writeJson(res, 404, { error: "not found" });
+					return;
+				}
+				res.writeHead(200, {
+					"content-type": found.mime,
+					"content-length": found.data.length,
+					"cache-control": "private, max-age=3600"
+				});
+				res.end(found.data);
+			}
+		},
+		{
+			kind: "exact",
+			path: TEMPLATES_API.list,
+			handler: async (req, res) => {
+				if (!guard(req, res, "POST")) return;
+				try {
+					writeJson(res, 200, {
+						ok: true,
+						...await templates.list()
+					});
+				} catch (error) {
+					writeJson(res, 200, {
+						ok: false,
+						code: "templates-failed",
+						message: messageOf(error)
+					});
+				}
+			}
+		},
+		{
+			kind: "exact",
+			path: TEMPLATES_API.refresh,
+			handler: async (req, res) => {
+				if (!guard(req, res, "POST")) return;
+				try {
+					writeJson(res, 200, {
+						ok: true,
+						...await templates.refresh()
+					});
+				} catch (error) {
+					writeJson(res, 200, {
+						ok: false,
+						code: "templates-refresh-failed",
+						message: messageOf(error)
+					});
+				}
+			}
+		},
+		{
+			kind: "prefix",
+			path: TEMPLATES_API.image,
+			handler: async (req, res) => {
+				if (!isLoopbackRequest(req)) {
+					writeJson(res, 403, { error: "forbidden: loopback-only" });
+					return;
+				}
+				if (req.method !== "GET") {
+					writeJson(res, 405, { error: `method not allowed: ${req.method}` });
+					return;
+				}
+				const file = imageFileFrom(req.url, TEMPLATES_API.image);
+				if (file === void 0) {
+					writeJson(res, 404, { error: "not found" });
+					return;
+				}
+				const found = await templates.readImage(file);
+				if (found === void 0) {
+					writeJson(res, 404, { error: "not found" });
+					return;
+				}
+				res.writeHead(200, {
+					"content-type": found.mime,
+					"content-length": found.data.length,
+					"cache-control": "private, max-age=86400"
+				});
+				res.end(found.data);
+			}
 		}
 	];
+}
+//#endregion
+//#region src/agent-image-tools.ts
+const imageRefSchema = {
+	type: "object",
+	additionalProperties: false,
+	properties: {
+		attachment_id: {
+			type: "string",
+			required: true
+		},
+		media_type: {
+			type: "string",
+			required: true
+		},
+		bytes: {
+			type: "integer",
+			required: true
+		},
+		width: {
+			type: "integer",
+			required: true
+		},
+		height: {
+			type: "integer",
+			required: true
+		},
+		name: { type: "string" }
+	}
+};
+const taskResultSchema = {
+	type: "object",
+	additionalProperties: false,
+	properties: {
+		task_id: {
+			type: "string",
+			required: true
+		},
+		status: {
+			type: "string",
+			required: true
+		},
+		message: {
+			type: "string",
+			required: true
+		},
+		error: { type: "string" },
+		images: {
+			type: "array",
+			required: true,
+			items: imageRefSchema
+		}
+	}
+};
+/** Agent calls stay pending until the provider and history write settle. */
+const AGENT_GENERATION_TIMEOUT_MS = 3e5;
+function ensureAgentImageConfigured(config) {
+	if (!config.enabled) throw new ImageGenError("AI image generation is disabled. Open Settings > Plugins > AI Image and enable it.", "plugin-disabled");
+	if (!config.allowAgentImageGeneration) throw new ImageGenError("Agent image generation is disabled in Settings > Plugins > AI Image.", "agent-generation-disabled");
+	if (!config.channels.some((channel) => channel.apiUrl.trim() !== "" && channel.apiKey.trim() !== "")) throw new ImageGenError("Image API credentials are not configured. Open Settings > Plugins > AI Image, add a channel and fill in its API URL and API key.", "image-api-not-configured");
+}
+/** Resolve a configured image alias and its owning channel. */
+function resolveAgentImageModel(config, requested) {
+	const entries = config.channels.flatMap((channel) => channel.models.map((model) => ({
+		channel,
+		alias: model.alias,
+		upstream: model.id
+	})));
+	if (entries.length === 0) throw new ImageGenError("No image models are configured. Open Settings > Plugins > AI Image and add a channel with at least one model.", "no-models-configured");
+	const wanted = typeof requested === "string" && requested.trim() !== "" ? requested.trim() : "";
+	if (wanted === "") {
+		if (entries.length === 1) return entries[0];
+		throw new ImageGenError(`Multiple image models are available — ask the user which channel and model to use, then call this tool again with that exact model name. Options: ${config.channels.flatMap((channel) => channel.models.map((model) => `"${channel.name} · ${model.alias}"`)).join(", ")}.`, "model-choice-required");
+	}
+	const hosting = entries.filter((entry) => entry.alias === wanted);
+	if (hosting.length === 0) throw new ImageGenError(`Image model "${wanted}" is not configured in any channel. Choose one of: ${[...new Set(entries.map((entry) => entry.alias))].join(", ")}.`, "image-model-not-configured");
+	return hosting.find((entry) => entry.channel.id === config.defaultChannelId) ?? hosting[0];
+}
+function findAgentImageTask(runtime, id) {
+	const task = runtime.queue.list().find((candidate) => candidate.id === id);
+	if (task === void 0) throw new ImageGenError(`Image generation task ${id} was not found.`, "task-not-found");
+	return task;
+}
+/** Wait for a queue task without sending anything through the chat model. */
+function waitForAgentImageTask(runtime, id, signal) {
+	return new Promise((resolveTask, rejectTask) => {
+		let settled = false;
+		let dispose = () => {};
+		let timer;
+		let abort = () => {};
+		const cleanup = () => {
+			dispose();
+			if (timer !== void 0) clearTimeout(timer);
+			signal?.removeEventListener("abort", abort);
+		};
+		const resolve = (task) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			resolveTask(task);
+		};
+		const reject = (error) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			rejectTask(error);
+		};
+		abort = () => {
+			if (settled) return;
+			const reason = signal?.reason instanceof Error ? signal.reason : /* @__PURE__ */ new Error("Image generation was cancelled.");
+			settled = true;
+			cleanup();
+			runtime.queue.cancel(id);
+			rejectTask(reason);
+		};
+		const onChange = (updated) => {
+			if (updated.id === id && isFinalTask(updated)) resolve(updated);
+		};
+		if (signal?.aborted === true) {
+			abort();
+			return;
+		}
+		dispose = runtime.queue.subscribe(onChange);
+		signal?.addEventListener("abort", abort, { once: true });
+		timer = setTimeout(() => {
+			if (settled) return;
+			const timeout = new ImageGenError(`Image generation task ${id} timed out after ${AGENT_GENERATION_TIMEOUT_MS / 1e3} seconds.`, "generation-timeout");
+			settled = true;
+			cleanup();
+			runtime.queue.cancel(id);
+			rejectTask(timeout);
+		}, AGENT_GENERATION_TIMEOUT_MS);
+		let current;
+		try {
+			current = findAgentImageTask(runtime, id);
+		} catch (error) {
+			reject(error);
+			return;
+		}
+		if (isFinalTask(current)) resolve(current);
+	});
+}
+/** Submit the same image-edit request used by the Agent tool. */
+async function submitAgentImageEdit(attachments, runtime, resolve, input) {
+	const config = resolve();
+	ensureAgentImageConfigured(config);
+	const reference = await attachments.readImage(input.sourceImage, input.signal);
+	const picked = resolveAgentImageModel(config, (config.channels.find((channel) => channel.id === config.defaultChannelId) ?? config.channels[0])?.models[0]?.alias ?? config.channels.flatMap((channel) => channel.models)[0]?.alias);
+	return waitForAgentImageTask(runtime, runtime.queue.submit({
+		mode: "edit",
+		model: picked.alias,
+		upstream: picked.upstream,
+		channelId: picked.channel.id,
+		channel: picked.channel.name,
+		prompt: input.prompt.trim(),
+		size: "auto",
+		quality: "auto",
+		n: 1,
+		detail: "",
+		image: imageDataUrl(reference),
+		...reference.ref.name === void 0 ? {} : { refName: reference.ref.name }
+	}).id, input.signal);
+}
+function acceptedMediaType(value) {
+	return value === "image/png" || value === "image/jpeg" || value === "image/webp" || value === "image/gif";
+}
+function projectRef(ref) {
+	return {
+		attachment_id: String(ref.attachmentId),
+		media_type: ref.mediaType,
+		bytes: ref.bytes,
+		width: ref.width,
+		height: ref.height,
+		...ref.name === void 0 ? {} : { name: ref.name }
+	};
+}
+function restoreRef(value) {
+	if (!acceptedMediaType(value.media_type)) throw new ImageGenError("source_image.media_type is not a supported image type", "bad-reference-image");
+	if (!Number.isInteger(value.bytes) || value.bytes < 1 || !Number.isInteger(value.width) || value.width < 1 || !Number.isInteger(value.height) || value.height < 1) throw new ImageGenError("source_image metadata is invalid", "bad-reference-image");
+	return {
+		attachmentId: value.attachment_id,
+		mediaType: value.media_type,
+		bytes: value.bytes,
+		width: value.width,
+		height: value.height,
+		...value.name === void 0 ? {} : { name: value.name }
+	};
+}
+function imageDataUrl(image) {
+	return `data:${image.ref.mediaType};base64,${Buffer.from(image.data).toString("base64")}`;
+}
+function renderTaskResult(value) {
+	return [{
+		type: "text",
+		text: JSON.stringify(value)
+	}];
+}
+/** The UI-only projection that keeps generated images beside the tool call. */
+function imagePresentationMeta(value) {
+	return { images: value.images.map((image) => {
+		const ref = {
+			attachment_id: image.attachment_id,
+			media_type: image.media_type,
+			bytes: image.bytes,
+			width: image.width,
+			height: image.height
+		};
+		if (image.name !== void 0) ref.name = image.name;
+		return ref;
+	}) };
+}
+function imageBlocksFromMeta(meta) {
+	if (typeof meta !== "object" || meta === null || Array.isArray(meta)) return [];
+	const images = meta.images;
+	if (!Array.isArray(images)) return [];
+	return images.flatMap((value) => {
+		if (typeof value !== "object" || value === null || Array.isArray(value)) return [];
+		const raw = value;
+		if (typeof raw.attachment_id !== "string" || typeof raw.media_type !== "string" || typeof raw.bytes !== "number" || typeof raw.width !== "number" || typeof raw.height !== "number") return [];
+		try {
+			return [{
+				type: "image",
+				attachment: restoreRef({
+					attachment_id: raw.attachment_id,
+					media_type: raw.media_type,
+					bytes: raw.bytes,
+					width: raw.width,
+					height: raw.height,
+					...typeof raw.name === "string" ? { name: raw.name } : {}
+				})
+			}];
+		} catch {
+			return [];
+		}
+	});
+}
+/** Rehydrate image attachments for the host-computed tool result view only. */
+function presentImageResult(_args, result) {
+	const content = result.isError ? [] : imageBlocksFromMeta(result.meta);
+	return content.length === 0 ? void 0 : {
+		card: "generic",
+		content
+	};
+}
+/** Register the global Agent tools and unregister them with the plugin lifecycle. */
+function registerAgentImageTools(ctx, runtime, resolve) {
+	const attachmentRefs = /* @__PURE__ */ new Map();
+	const ensureConfigured = () => {
+		ensureAgentImageConfigured(resolve());
+	};
+	const resolveModel = (requested) => resolveAgentImageModel(resolve(), requested);
+	const materializeTaskImages = (task) => {
+		if (task.status !== "completed") return Promise.resolve([]);
+		const existing = attachmentRefs.get(task.id);
+		if (existing !== void 0) return existing;
+		const pending = ctx.attachments.saveImages((task.result?.images ?? []).map((image, index) => toSaveImage(image, task.id, index))).then((refs) => refs.map(projectRef));
+		attachmentRefs.set(task.id, pending);
+		pending.catch(() => {
+			if (attachmentRefs.get(task.id) === pending) attachmentRefs.delete(task.id);
+		});
+		return pending;
+	};
+	const taskResult = async (task) => {
+		const images = await materializeTaskImages(task);
+		return {
+			task_id: task.id,
+			status: task.status,
+			message: task.status === "completed" ? "Generation completed. The images are shown beside this tool call and can be reused as source_image in edit_image." : task.status === "failed" ? "Generation failed." : task.status === "cancelled" ? "Generation was cancelled." : "Generation is still running. Query the task again when you need its current status.",
+			...task.error === void 0 ? {} : { error: task.error },
+			images
+		};
+	};
+	const findTask = (id) => findAgentImageTask(runtime, id);
+	const waitForTask = (id, signal) => waitForAgentImageTask(runtime, id, signal);
+	const disposers = [
+		ctx.tools.register(defineTool({
+			name: "generate_image",
+			description: "Generate an image. By default this tool call stays pending until the task reaches a final state; completed images are shown beside this tool call, while the model receives their attachment references, without creating a user message. Set wait_for_completion to false for background mode, then use get_image_generation_task explicitly. Only use models configured for this plugin; omit model to use the first configured image model.",
+			parameters: {
+				prompt: {
+					type: "string",
+					required: true,
+					description: "Detailed image-generation prompt."
+				},
+				model: {
+					type: "string",
+					description: "One of the configured image models. Defaults to the first configured model."
+				},
+				size: {
+					type: "string",
+					description: "Aspect ratio such as 1:1, 16:9, 9:16, or auto."
+				},
+				quality: {
+					type: "string",
+					description: "auto, 1k, 2k, or 4k."
+				},
+				count: {
+					type: "integer",
+					description: "Number of images, 1 to 4. Defaults to 1."
+				},
+				detail: {
+					type: "string",
+					description: "Optional provider detail value, for example standard or high."
+				},
+				wait_for_completion: {
+					type: "boolean",
+					description: "Wait for images and return them in this tool result. Defaults to true; set false for background mode."
+				}
+			},
+			output: {
+				schema: taskResultSchema,
+				render: (_args, value) => renderTaskResult(value),
+				presentationMeta: (_args, value) => imagePresentationMeta(value)
+			},
+			presentResult: presentImageResult,
+			async execute(args, exec) {
+				ensureConfigured();
+				const picked = resolveModel(args.model);
+				const task = runtime.queue.submit({
+					mode: "text",
+					model: picked.alias,
+					upstream: picked.upstream,
+					channelId: picked.channel.id,
+					channel: picked.channel.name,
+					prompt: args.prompt.trim(),
+					size: args.size ?? "auto",
+					quality: args.quality ?? "auto",
+					n: Math.min(4, Math.max(1, args.count ?? 1)),
+					detail: args.detail ?? ""
+				});
+				return taskResult(args.wait_for_completion === false ? task : await waitForTask(task.id, exec.signal));
+			}
+		})),
+		ctx.tools.register(defineTool({
+			name: "edit_image",
+			description: "Edit an image. By default this tool call stays pending until the task reaches a final state; completed images are shown beside this tool call, while the model receives their attachment references, without creating a user message. Set wait_for_completion to false for background mode, then use get_image_generation_task explicitly. source_image must be an image reference returned by a completed generation or get_image_generation_task; pass that entire object unchanged. Only configured image models are allowed; omit model to use the first configured model.",
+			parameters: {
+				prompt: {
+					type: "string",
+					required: true,
+					description: "How to transform the source image."
+				},
+				source_image: {
+					...imageRefSchema,
+					required: true,
+					description: "Image reference returned by get_image_generation_task."
+				},
+				model: {
+					type: "string",
+					description: "One of the configured image models. Defaults to the first configured model."
+				},
+				size: {
+					type: "string",
+					description: "Aspect ratio such as 1:1, 16:9, 9:16, or auto."
+				},
+				quality: {
+					type: "string",
+					description: "auto, 1k, 2k, or 4k."
+				},
+				count: {
+					type: "integer",
+					description: "Number of images, 1 to 4. Defaults to 1."
+				},
+				detail: {
+					type: "string",
+					description: "Optional provider detail value."
+				},
+				wait_for_completion: {
+					type: "boolean",
+					description: "Wait for images and return them in this tool result. Defaults to true; set false for background mode."
+				}
+			},
+			output: {
+				schema: taskResultSchema,
+				render: (_args, value) => renderTaskResult(value),
+				presentationMeta: (_args, value) => imagePresentationMeta(value)
+			},
+			presentResult: presentImageResult,
+			async execute(args, exec) {
+				ensureConfigured();
+				const reference = await ctx.attachments.readImage(restoreRef(args.source_image), exec.signal);
+				const picked = resolveModel(args.model);
+				const task = runtime.queue.submit({
+					mode: "edit",
+					model: picked.alias,
+					upstream: picked.upstream,
+					channelId: picked.channel.id,
+					channel: picked.channel.name,
+					prompt: args.prompt.trim(),
+					size: args.size ?? "auto",
+					quality: args.quality ?? "auto",
+					n: Math.min(4, Math.max(1, args.count ?? 1)),
+					detail: args.detail ?? "",
+					image: imageDataUrl(reference),
+					...reference.ref.name === void 0 ? {} : { refName: reference.ref.name }
+				});
+				return taskResult(args.wait_for_completion === false ? task : await waitForTask(task.id, exec.signal));
+			}
+		})),
+		ctx.tools.register(defineTool({
+			name: "get_image_generation_task",
+			description: "Check an image-generation task status. Completed tasks return image references; their images are shown beside this tool call and the references can be passed to edit_image. Generation tools normally wait for completion, so use this for explicit recovery or status checks.",
+			parameters: { task_id: {
+				type: "string",
+				required: true,
+				description: "Task id returned by generate_image or edit_image."
+			} },
+			output: {
+				schema: taskResultSchema,
+				render: (_args, value) => renderTaskResult(value),
+				presentationMeta: (_args, value) => imagePresentationMeta(value)
+			},
+			presentResult: presentImageResult,
+			async execute(args) {
+				ensureConfigured();
+				return taskResult(findTask(args.task_id));
+			}
+		})),
+		ctx.tools.register(defineTool({
+			name: "cancel_image_generation_task",
+			description: "Cancel a queued or running image generation task.",
+			parameters: { task_id: {
+				type: "string",
+				required: true,
+				description: "Task id returned by generate_image or edit_image."
+			} },
+			output: {
+				schema: taskResultSchema,
+				render: (_args, value) => renderTaskResult(value),
+				presentationMeta: (_args, value) => imagePresentationMeta(value)
+			},
+			presentResult: presentImageResult,
+			async execute(args) {
+				ensureConfigured();
+				const task = runtime.queue.cancel(args.task_id);
+				if (task === void 0) throw new ImageGenError(`Image generation task ${args.task_id} was not found.`, "task-not-found");
+				return taskResult(task);
+			}
+		}))
+	];
+	return () => {
+		for (const dispose of disposers) dispose();
+	};
+}
+function isFinalTask(task) {
+	return task.status === "completed" || task.status === "failed" || task.status === "cancelled";
+}
+function toSaveImage(image, taskId, index) {
+	const data = Buffer.from(image.b64, "base64");
+	const declaredMediaType = acceptedMediaType(image.mime) ? image.mime : "image/png";
+	const mediaType = detectImageMime(data) ?? declaredMediaType;
+	return {
+		data,
+		mediaType,
+		name: `imagegen-${taskId}-${index + 1}.${mediaType === "image/jpeg" ? "jpg" : mediaType.slice(6)}`
+	};
+}
+//#endregion
+//#region src/edit-image-command.ts
+function isImageReference(value) {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const ref = value;
+	return typeof ref.attachmentId === "string" && (ref.mediaType === "image/png" || ref.mediaType === "image/jpeg" || ref.mediaType === "image/webp" || ref.mediaType === "image/gif") && Number.isInteger(ref.bytes) && ref.bytes > 0 && Number.isInteger(ref.width) && ref.width > 0 && Number.isInteger(ref.height) && ref.height > 0;
+}
+function imageInContent(value) {
+	if (!Array.isArray(value)) return void 0;
+	for (let index = value.length - 1; index >= 0; index -= 1) {
+		const block = value[index];
+		if (typeof block !== "object" || block === null || Array.isArray(block)) continue;
+		const raw = block;
+		if (raw.type === "image" && isImageReference(raw.attachment)) return raw.attachment;
+		if (raw.type === "tool-result") {
+			const nested = imageInContent(raw.content);
+			if (nested !== void 0) return nested;
+		}
+	}
+}
+/** Pick the newest image explicitly attached to this command invocation. */
+function imageInInvocation(value) {
+	if (!Array.isArray(value)) return void 0;
+	for (let index = value.length - 1; index >= 0; index -= 1) {
+		const block = value[index];
+		if (typeof block !== "object" || block === null || Array.isArray(block)) continue;
+		const raw = block;
+		if (raw.type === "image" && isImageReference(raw.attachment)) return raw.attachment;
+	}
+}
+/** Find the newest durable image reference, including nested tool results. */
+function latestSessionImage(messages) {
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		const message = messages[index];
+		if (typeof message !== "object" || message === null || Array.isArray(message)) continue;
+		const image = imageInContent(message.content);
+		if (image !== void 0) return image;
+	}
+}
+function commandError(error) {
+	const text = error instanceof Error ? error.message : String(error);
+	return {
+		kind: "error",
+		text: text.trim() === "" ? "图片编辑失败。" : text
+	};
+}
+/** Register the host-side command; it never sends the command line to a chat model. */
+function registerEditImageCommand(ctx, runtime, resolve, pendingImages) {
+	return ctx.commands.register({
+		name: "edit_image",
+		description: "Edit the latest image in this conversation with the plugin image model",
+		input: {
+			hint: "Describe how to modify the latest image",
+			images: true
+		},
+		async handler(invocation) {
+			const prompt = invocation.rawInput.trim();
+			if (prompt === "") return {
+				kind: "error",
+				text: "请提供图片修改描述，例如：/edit_image 把背景改成夜景"
+			};
+			const invocationImage = imageInInvocation(invocation.attachments);
+			const pendingImage = pendingImages?.get(String(invocation.agent.id));
+			const durableImage = latestSessionImage(invocation.agent.session.deriveMessages());
+			const sourceImage = invocationImage ?? pendingImage ?? durableImage;
+			if (sourceImage === void 0) return {
+				kind: "error",
+				text: "当前对话没有可用图片，请先上传图片或把画廊图片加入对话。"
+			};
+			try {
+				const task = await submitAgentImageEdit(ctx.attachments, runtime, resolve, {
+					prompt,
+					sourceImage,
+					signal: invocation.signal
+				});
+				if (task.status === "completed") {
+					if (pendingImage !== void 0) pendingImages?.consume(String(invocation.agent.id), pendingImage);
+					return {
+						kind: "success",
+						text: "图片编辑已完成，可在 AI 生图面板查看结果。"
+					};
+				}
+				return {
+					kind: "error",
+					text: task.error ?? `图片编辑${task.status === "cancelled" ? "已取消" : "失败"}。`
+				};
+			} catch (error) {
+				return commandError(error);
+			}
+		}
+	});
 }
 //#endregion
 //#region src/index.ts
 /** Stable cordis plugin name. */
 const name = "imagegen";
 /** Services required before the surfaces can mount. */
-const inject = ["webServer", "systemPrompt"];
+const inject = [
+	"webServer",
+	"systemPrompt",
+	"commands"
+];
 /** The branded settings namespace of this plugin (the card edits it). */
-const ImageGenSettingsNamespace = settingsNamespace(IMAGEGEN_SETTINGS_NAMESPACE);
+const ImageGenSettingsNamespace = settingsNamespaceCompat(IMAGEGEN_SETTINGS_NAMESPACE);
 const Config = z.object({
 	enabled: z.boolean().default(true),
 	announceToAgent: z.boolean().default(true),
+	allowAgentImageGeneration: z.boolean().default(true),
+	channels: z.array(z.object({
+		id: z.string(),
+		preset: z.string().default(""),
+		name: z.string().default(""),
+		apiUrl: z.string().default(""),
+		models: z.array(z.object({
+			alias: z.string(),
+			id: z.string()
+		})).default([])
+	})).default([]),
+	channelSecrets: z.dict(z.string().role("secret")).default({}),
+	defaultChannelId: z.string().default(""),
+	promptApiUrl: z.string().default(""),
+	promptApiKey: z.string().role("secret").default(""),
+	promptModel: z.string().default(""),
 	apiUrl: z.string().default(""),
-	apiKey: z.string().role("secret").default("")
+	apiKey: z.string().role("secret").default(""),
+	imageModels: z.array(z.string()).default([])
 });
 /** Schema defaults, re-read for hand-built contexts (the loader applies them normally). */
 const DEFAULT_ENABLED = true;
 const DEFAULT_ANNOUNCE = true;
+const DEFAULT_ALLOW_AGENT_IMAGE_GENERATION = true;
 /** Order of the announcement section within the tool-guidance band. */
 const SECTION_ORDER = 150;
 /** Model-facing announcement: plugin presence, capabilities, and limits. */
-const IMAGEGEN_GUIDANCE = "本机已安装 dsh-imagegen 插件（DSH AI 生图）：侧边栏「AI 生图」入口。能力：对接 OpenAI 兼容图像生成 API（模型 gpt-image-2），支持文生图（/images/generations）与图生图（/images/edits，上传参考图）；API 地址与密钥在 GUI「设置 → 插件 → 可配置」中配置，密钥仅存于本机设置文档；生成请求由本地宿主代理转发，结果以 base64 返回面板，可预览与下载。限制：生成消耗上游 API 额度；图片内容由上游模型生成，可能不符合预期或包含不适宜内容；api_key 以明文存储在设置文档中；参考图会发送至所配置的 API 服务。用户提到「生图 / 绘画 / 生成图片 / gpt-image-2 / 文生图 / 图生图」时即指本插件，请据此协作。";
+const IMAGEGEN_GUIDANCE = "本机已安装 dsh-imagegen 插件（DSH AI 生图）：侧边栏「AI 生图」入口。能力：通过「渠道」对接 OpenAI 兼容图像生成 API（每个渠道 = 一个 API 端点 + 各自的模型目录），支持文生图（/images/generations）与图生图（/images/edits，上传参考图，grok-imagine 模型按官方 JSON image_url 协议发送，nanobanana 系列按 aspect_ratio / image_size 参数协议发送；seedream 系列统一走 /images/generations，参考图以 JSON image 数组发送；智谱 `glm-image` 使用官方 `/api/paas/v4/images/generations`，当前仅支持文生图）。API 地址与密钥在 GUI 设置中按渠道配置，密钥仅存于本机设置文档；生成请求由本地宿主代理转发，结果以 base64 返回面板，可预览与下载。模型只能使用用户在各渠道配置目录中的模型；检测模型时会过滤聊天、Embedding 等非图片模型，但模型出现在 /models 中仍不等于其网关原生支持生图协议，遇到 Qwen、Gemini 等非 OpenAI 生图协议时应如实说明上游兼容性。可一键把满意的图片加入「画廊」。内置「提示词模板库」（面板提示词框左下角「模板库」按钮）：打包 awesome-gpt-image-2 的数百条提示词案例，可搜索、筛选与复用。Agent 可直接调用 `generate_image` 提交文生图，也可用 `edit_image` 图生图；默认保持工具调用等待直到任务完成，完成图片显示在工具调用对应的左侧结果区域，模型收到状态和附件引用，不会额外伪造用户消息。用户也可以使用 `/edit_image <修改描述>`，命令会直接读取当前对话最近图片并调用插件图片模型，不经过对话模型的图片能力检查。若明确需要后台执行，可传 `wait_for_completion: false`，之后再用 `get_image_generation_task` 查询；不要反复轮询。限制：生成消耗上游 API 额度；图片内容由上游模型生成，可能不符合预期或包含不适宜内容；api_key 以明文存储在设置文档中；参考图会发送至所配置的 API 服务；模板库在线刷新与参考图首次加载需要访问 vibeui.top。用户提到「生图 / 绘画 / 生成图片 / 文生图 / 图生图 / 画廊 / 提示词模板」时即指本插件，请据此协作。";
+/** Append the live channel × model table so an Agent can honor user choices. */
+function guidanceFor(channels, defaultChannelId) {
+	if (channels.length === 0) return `${IMAGEGEN_GUIDANCE} 尚未配置任何渠道：请先在「设置 → 插件 → AI 生图」添加渠道并填写 API 地址与密钥。`;
+	const table = channels.map((channel) => {
+		const aliases = channel.models.map((model) => model.alias).join("、");
+		const mark = channel.id === defaultChannelId ? "（默认渠道）" : "";
+		const key = channel.apiKey === "" ? "（未填密钥）" : "";
+		const models = channel.models.length === 0 ? "未配置模型" : `可用模型：${aliases}`;
+		return `渠道「${channel.name}」${mark}[${channel.apiUrl}] ${models}${key}`;
+	}).join("；");
+	return `${IMAGEGEN_GUIDANCE} 当前渠道与模型：${table}。用户指定模型名时取该模型所属渠道（多渠道同名用默认渠道）；未指定模型时若仅一个可用模型可直接生成，若有多个应先询问用户选择「渠道 + 模型」。`;
+}
+/** Normalize raw channel entries into the wire shape (schema-adjacent guard). */
+function normalizeChannels(value) {
+	if (!Array.isArray(value)) return [];
+	const out = [];
+	for (const item of value) {
+		if (item === null || typeof item !== "object") continue;
+		const raw = item;
+		const id = typeof raw.id === "string" ? raw.id.trim() : "";
+		if (id === "") continue;
+		const models = [];
+		if (Array.isArray(raw.models)) for (const entry of raw.models) {
+			if (entry === null || typeof entry !== "object") continue;
+			const record = entry;
+			const alias = typeof record.alias === "string" ? record.alias.trim() : "";
+			const upstream = typeof record.id === "string" ? record.id.trim() : "";
+			if (alias === "") continue;
+			models.push({
+				alias,
+				id: upstream === "" ? alias : upstream
+			});
+		}
+		out.push({
+			id,
+			preset: typeof raw.preset === "string" ? raw.preset : "",
+			name: typeof raw.name === "string" ? raw.name.trim() : "",
+			apiUrl: typeof raw.apiUrl === "string" ? raw.apiUrl.trim() : "",
+			models
+		});
+	}
+	return out;
+}
 /**
 * Mount the settings section, routes, and announcement.
 * @param ctx - host plugin context carrying webServer/systemPrompt.
@@ -1251,31 +3553,118 @@ const IMAGEGEN_GUIDANCE = "本机已安装 dsh-imagegen 插件（DSH AI 生图�
 function apply(ctx, config) {
 	let current = () => config ?? {};
 	const resolve = () => {
-		const value = current();
+		const value = current() ?? {};
+		let channels = normalizeChannels(value.channels);
+		const secrets = { ...value.channelSecrets ?? {} };
+		if (channels.length === 0) {
+			const legacyUrl = typeof value.apiUrl === "string" ? value.apiUrl.trim() : "";
+			const legacyModels = Array.isArray(value.imageModels) ? value.imageModels.filter((model) => typeof model === "string" && model.trim() !== "").map((model) => ({
+				alias: model.trim(),
+				id: model.trim()
+			})) : [];
+			if (legacyUrl !== "" || legacyModels.length > 0) {
+				channels = [{
+					id: "default",
+					preset: "",
+					name: "默认渠道",
+					apiUrl: legacyUrl,
+					models: legacyModels
+				}];
+				const legacyKey = typeof value.apiKey === "string" ? value.apiKey.trim() : "";
+				if (legacyKey !== "") secrets["default"] = legacyKey;
+			}
+		}
+		const named = channels.map((channel) => ({
+			...channel,
+			name: channel.name === "" ? presetById(channel.preset)?.name ?? "未命名渠道" : channel.name
+		}));
+		const defaultChannelId = typeof value.defaultChannelId === "string" && named.some((channel) => channel.id === value.defaultChannelId) ? value.defaultChannelId : named[0]?.id ?? "";
 		return {
 			enabled: value.enabled ?? DEFAULT_ENABLED,
 			announceToAgent: value.announceToAgent ?? DEFAULT_ANNOUNCE,
-			apiUrl: value.apiUrl ?? "",
-			apiKey: value.apiKey ?? ""
+			allowAgentImageGeneration: value.allowAgentImageGeneration ?? DEFAULT_ALLOW_AGENT_IMAGE_GENERATION,
+			channels: named.map((channel) => ({
+				...channel,
+				apiKey: typeof secrets[channel.id] === "string" ? secrets[channel.id] : ""
+			})),
+			defaultChannelId,
+			promptApiUrl: typeof value.promptApiUrl === "string" ? value.promptApiUrl.trim() : "",
+			promptApiKey: typeof value.promptApiKey === "string" ? value.promptApiKey.trim() : "",
+			promptModel: typeof value.promptModel === "string" ? value.promptModel.trim() : ""
 		};
 	};
-	ctx.inject(["settings"], (sctx) => {
+	const channelsView = () => {
+		const value = resolve();
+		return {
+			channels: value.channels,
+			defaultChannelId: value.defaultChannelId
+		};
+	};
+	const runtime = new ImageGenerationRuntime(channelsView);
+	const pendingConversationImages = /* @__PURE__ */ new Map();
+	ctx.inject(["settings", "attachments"], (sctx) => {
 		const seam = sctx.get("settings");
 		sctx.effect(() => {
 			const disposers = makeRoutes({
 				settings: seam,
 				resolve: () => {
 					const value = resolve();
+					const channel = value.channels.find((candidate) => candidate.id === value.defaultChannelId) ?? value.channels[0];
 					return {
-						apiUrl: value.apiUrl,
-						apiKey: value.apiKey
+						apiUrl: channel?.apiUrl ?? "",
+						apiKey: channel?.apiKey ?? ""
 					};
-				}
+				},
+				resolveChannels: channelsView,
+				resolvePrompt: () => {
+					const value = resolve();
+					const channel = value.channels.find((candidate) => candidate.id === value.defaultChannelId) ?? value.channels[0];
+					return {
+						apiUrl: value.promptApiUrl !== "" ? value.promptApiUrl : channel?.apiUrl ?? "",
+						apiKey: value.promptApiKey !== "" ? value.promptApiKey : channel?.apiKey ?? "",
+						model: value.promptModel
+					};
+				},
+				resolveImageModels: () => {
+					const value = resolve();
+					return [...new Set(value.channels.flatMap((channel) => channel.models.map((model) => model.alias)))];
+				},
+				attachments: sctx.attachments,
+				pendingConversationImages,
+				runtime
 			}).map((route) => ctx.webServer.register(route));
 			return () => {
 				for (const dispose of disposers) dispose();
 			};
 		}, "dsh-imagegen: routes");
+	});
+	ctx.inject([
+		"tools",
+		"attachments",
+		"commands"
+	], (tctx) => {
+		tctx.effect(() => {
+			const resolveAgentConfig = () => {
+				const value = resolve();
+				return {
+					enabled: value.enabled,
+					allowAgentImageGeneration: value.allowAgentImageGeneration,
+					channels: value.channels,
+					defaultChannelId: value.defaultChannelId
+				};
+			};
+			const disposeTools = registerAgentImageTools(tctx, runtime, resolveAgentConfig);
+			const disposeCommand = registerEditImageCommand(tctx, runtime, resolveAgentConfig, {
+				get: (sessionId) => pendingConversationImages.get(sessionId),
+				consume: (sessionId, ref) => {
+					if (pendingConversationImages.get(sessionId)?.attachmentId === ref.attachmentId) pendingConversationImages.delete(sessionId);
+				}
+			});
+			return () => {
+				disposeCommand();
+				disposeTools();
+			};
+		}, "dsh-imagegen: agent image tools and commands");
 	});
 	let disposeSection;
 	const sync = () => {
@@ -1288,10 +3677,10 @@ function apply(ctx, config) {
 		disposeSection = ctx.systemPrompt.section({
 			name: "plugin:dsh-imagegen",
 			order: SECTION_ORDER,
-			text: IMAGEGEN_GUIDANCE
+			text: guidanceFor(value.channels, value.defaultChannelId)
 		});
 	};
-	installSettingsSection(ctx, ImageGenSettingsNamespace, Config, config ?? {}, {
+	installSettingsSectionCompat(ctx, ImageGenSettingsNamespace, Config, config ?? {}, {
 		setSource: (source) => {
 			current = source;
 			sync();
@@ -1301,6 +3690,4 @@ function apply(ctx, config) {
 	sync();
 }
 //#endregion
-export { CURRENT_VERSION, Config, IMAGEGEN_GUIDANCE, ImageGenError, ImageGenSettingsNamespace, apply, checkForUpdate, clearUpdateCache, compareVersions, generateImage, inject, installUpdate, makeRoutes, name, profileFromProcess };
-
-//# sourceMappingURL=index.js.map
+export { CURRENT_VERSION, Config, IMAGEGEN_GUIDANCE, ImageGenError, ImageGenSettingsNamespace, ImageGenerationRuntime, appendGallery, apply, checkForUpdate, clearGallery, clearTemplateMemo, clearUpdateCache, compareVersions, generateImage, inject, installUpdate, latestSessionImage, listGallery, listTemplates, makeRoutes, name, profileFromProcess, readGalleryImage, readTemplateImage, refreshTemplates, registerAgentImageTools, registerEditImageCommand, removeGallery, updateGalleryTags };

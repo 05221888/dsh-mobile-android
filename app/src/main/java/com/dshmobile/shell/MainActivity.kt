@@ -1158,15 +1158,28 @@ class MainActivity : ComponentActivity() {
   }
 
   /**
-   * 先按当前开关启动；超时则只留启动必需插件再启一次。
-   * 上次超时就是桌面插件（notify-sound / imagegen）在加载阶段崩了。
+   * 三级启动兜底：全部开关 → 只留 safe 插件 → 只留 bootCritical 插件。
+   *
+   * 一级超时基本都是桌面插件（notify-sound / imagegen）在加载阶段崩了。
+   * 二级仍超时说明"被标成 safe 的插件其实有毒"（v0.15.x imagegen 就是），
+   * 三级把所有可选项全关，保证用户至少能进聊天。
    */
   private fun waitForEngineOrFallback(): Boolean {
     if (!engineManager.startEngine()) return false
     runOnUiThread { engineStatus.text = "正在启动引擎…" }
     if (waitForEngine(90)) return true
+
     runOnUiThread { engineStatus.text = "插件拖垮了引擎，正在改用安全模式…" }
     PluginCatalog.enableOnlyBootCritical(this)
+    if (restartEngineAndWait()) return true
+
+    runOnUiThread { engineStatus.text = "安全模式仍超时，正在用最小插件集启动…" }
+    PluginCatalog.enableMinimalSet(this)
+    return restartEngineAndWait()
+  }
+
+  /** 停掉旧进程并重启一次，等 90 秒。 */
+  private fun restartEngineAndWait(): Boolean {
     try { engineManager.stopEngine() } catch (_: Exception) {}
     EngineManager.lastStartAttemptAt = 0
     if (!engineManager.startEngine()) return false

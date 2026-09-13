@@ -1,7 +1,10 @@
 {
-  "versionCode": 30,
-  "versionName": "0.14.0",
-  "url": "https://gitee.com/wushenghuang/dsh-mobile-releases/releases/download/apk-v0.14.0/DSH-Mobile-0.14.0-debug.apk",
-  "sha256": "307162010163b99fadbbc6f1c2f4bdf403e09882cf056702c6c1e435708371a1",
-  "notes": "「AI 生图」默认开启并修复工作区面板挂载（centerCol 补丁内置），新增「问题导航」气泡插件（电脑同款），记忆互通继续在列。"
+  "versionCode": 33,
+  "versionName": "0.15.2",
+  "url": "https://gitee.com/wushenghuang/dsh-mobile-releases/releases/download/apk-v0.15.2/DSH-Mobile-0.15.2-debug.apk",
+  "sha256": "30860f7a48aa03e008cea2fb870e11d33a9a76d65b924cd82735b6250945b501",
+  "size": 81727357,
+  "format": "apk",
+  "decompressionHint": "已是 .apk，无需解压",
+  "notes": "v0.15.2 修「装完用不了」：v0.15.0/0.15.1 把 AI 生图插件升到 1.5.1 时丢了随包 node_modules，手机快照只有 @deepseek-ai/schemastery，插件顶部 import \"schemastery\" 抛 ERR_MODULE_NOT_FOUND，cordis fail-loud 把整棵插件树带倒 → 引擎两次启动超时、进不去聊天；而该插件又标了 safe=true，一级安全模式关不掉它。修复：① 恢复插件随包 node_modules；② 引擎侧新增裸依赖兜底（bare schemastery/ws symlink 到快照作用域版）；③ 插件铺装改版本感知（版本不一致整目录重铺）；④ imagegen safe 改 false；⑤ 启动改三级兜底（全开→safe→最小集）。下载 https://gitee.com/wushenghuang/dsh-mobile-releases/releases/download/apk-v0.15.2/DSH-Mobile-0.15.2-debug.apk 。"
 }

@@ -1,234 +1,194 @@
-// src/index.ts
-import { readdir, readFile, stat } from "node:fs/promises";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { WebSocket, WebSocketServer } from "ws";
-import z from "schemastery";
-import { settingsNamespace } from "@deepseek-ai/dsh-settings";
+/**
+ * dsh-notify-sound — 宿主半区
+ *
+ * 注册 `notify-sound` 设置命名空间（schema 见 Config，字段全部带默认值，
+ * 即"默认配置一套"）+ `/notify-sound/settings` 读写路由。
+ *
+ * 为什么需要自建路由：官方 apiproxy 的 settings 暴露白名单
+ * （WEB_SETTINGS_NAMESPACES）是硬编码的，第三方插件的命名空间一律答
+ * `settings-not-exposed`——因此浏览器端经官方 settingsScope 读不到本
+ * 命名空间。本路由绕开该边界：GET 返回命名空间视图（value/base/user/
+ * revision/writable），POST 批量写用户层（set/unset，revision 栅栏），
+ * 内部经 dsh-settings 的 replace 提交。配置落在 profile 的 settings
+ * 用户层（服务端持久化），所有浏览器/设备读同一份配置即天然同步。
+ *
+ * 本配置无 secret 字段，redact 逻辑保留（secrets 恒为 []）。
+ * @module dsh-notify-sound
+ */
 
-// src/trust-fence.ts
-function header(headers, name2) {
-  const value = headers[name2];
-  return typeof value === "string" ? value : void 0;
-}
-function parseAuthority(authority) {
-  try {
-    return new URL(`http://${authority}`);
-  } catch {
-    return void 0;
-  }
-}
-function isLoopbackHostname(hostname) {
-  if (hostname === "localhost" || hostname === "[::1]") return true;
-  const parts = hostname.split(".");
-  return parts.length === 4 && parts[0] === "127" && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255);
-}
-function canonicalAuthority(entry, entryUrl) {
-  const port = entryUrl.port !== "" ? entryUrl.port : new URL(`https://${entry}`).port;
-  return port === "" ? entryUrl.hostname : `${entryUrl.hostname}:${port}`;
-}
-function isTrustedAuthority(hostUrl, trustedHosts) {
-  return trustedHosts.some((entry) => {
-    const entryUrl = parseAuthority(entry);
-    if (entryUrl === void 0) return false;
-    return canonicalAuthority(entry, entryUrl) === entryUrl.hostname ? entryUrl.hostname === hostUrl.hostname : entryUrl.host === hostUrl.host;
-  });
-}
-function isTrustedApiRequest(request, trustedHosts) {
-  const host = header(request.headers, "host");
-  if (host === void 0) return false;
-  const hostUrl = parseAuthority(host);
-  if (hostUrl === void 0) return false;
-  if (!isLoopbackHostname(hostUrl.hostname) && !isTrustedAuthority(hostUrl, trustedHosts)) return false;
-  if (header(request.headers, "sec-fetch-site") === "cross-site") return false;
-  const origin = header(request.headers, "origin");
-  if (origin === void 0) return true;
-  try {
-    return new URL(origin).host === hostUrl.host;
-  } catch {
-    return false;
-  }
-}
-function trustedHostsOf(ctx) {
-  for (const entry of ctx.loader.entries()) {
-    if (entry.options.name === "connection") return entry.options.config?.trustedHosts ?? [];
-  }
-  return [];
-}
+import z from '@deepseek-ai/schemastery'
+import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 
-// src/index.ts
-var name = "dsh-notify-sound";
-var inject = ["webServer", "loader", "settings"];
-var NS = "dsh-notify-sound";
-var API_PREFIX = "/notify-sound/api";
-var SOUND_PREFIX = "/notify-sound/sounds";
-var WS_PATH = "/notify-sound/ws";
-var SOUNDS_DIR = fileURLToPath(new URL("../sounds/", import.meta.url));
-var SOUND_RE = /^[a-z0-9-]+\.aac$/;
-var PrefsSchema = z.object({
+export const name = 'notify-sound'
+export const inject = ['webServer']
+
+/** 设置命名空间名（与浏览器端路由约定一致）。 */
+export const SETTINGS_NAMESPACE = 'notify-sound'
+
+/** 设置读写 API 路径（浏览器端 GET 视图 / POST 批量写）。 */
+export const SETTINGS_API_PATH = '/notify-sound/settings'
+
+/** 请求体上限：9 个字段的批量写，64 KiB 富余。 */
+export const SETTINGS_BODY_CAP = 64 * 1024
+
+/**
+ * 配置 schema（"默认配置一套"）：
+ * - 完成类：回合结束 / 后台任务完成 → defaultSound（chime 风铃）
+ * - 注意类（始终响，不受 quietCurrent 限制）：
+ *   审批请求 / 用户提问 / 计划评审 → 专属音，留空跟随通用注意音（ding）
+ *   目标受阻 → goalBlockedSound（bell 铃铛）
+ *   后台任务失败 → failureSound（alert 警示）
+ * 空字符串 = "跟随通用注意音"（浏览器端解析）。
+ */
+export const Config = z.object({
   enabled: z.boolean().default(true),
-  sound: z.string().default("staplebops-01.aac"),
-  volume: z.number().min(0).max(1).default(0.8)
-});
-function writeJson(res, status, body) {
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
-  res.end(JSON.stringify(body));
-}
-function writeOk(res, value) {
-  writeJson(res, 200, { ok: true, value });
-}
-function writeError(res, status, code, message) {
-  writeJson(res, status, { ok: false, error: { code, message } });
-}
-var settingsFace = {
-  get: () => ({ value: void 0, revision: void 0 }),
-  update: async () => ({ value: void 0, revision: void 0 })
-};
-function apply(ctx) {
-  ctx.inject(["settings"], (sctx) => {
-    const ns = settingsNamespace(NS);
-    sctx.settings.register(ns, PrefsSchema);
-    const viewOf = () => {
-      const descriptor = sctx.settings.describe({ redactSecrets: true }).find((c) => c.ns === ns);
-      return descriptor === void 0 ? { value: void 0, revision: void 0 } : { value: descriptor.value, revision: descriptor.revision };
-    };
-    settingsFace = {
-      get: viewOf,
-      update: async (patch, expectedRevision) => {
-        await sctx.settings.update(ns, patch, expectedRevision);
-        return viewOf();
-      }
-    };
-  });
-  const fence = (req) => isTrustedApiRequest(req, trustedHostsOf(ctx));
-  const wss = new WebSocketServer({ noServer: true });
-  ctx.effect(() => ctx.webServer.registerUpgrade({
-    path: WS_PATH,
-    handler: (req, socket, head) => {
-      if (!fence(req)) {
-        socket.destroy();
-        return;
-      }
-      wss.handleUpgrade(req, socket, head, (ws) => {
-        ws.on("error", () => {
-        });
-        ws.on("close", () => {
-        });
-      });
-    }
-  }), "dsh-notify-sound: notification WebSocket");
-  const broadcast = (payload) => {
-    const text = JSON.stringify(payload);
-    for (const client of wss.clients) {
-      if (client.readyState === WebSocket.OPEN) client.send(text);
-    }
-  };
-  const disposeEvents = ctx.on("session/event", (session, event) => {
+  quietCurrent: z.boolean().default(false),
+  defaultSound: z.string().default('chime'),
+  attentionSound: z.string().default('ding'),
+  approvalSound: z.string().default(''),
+  questionSound: z.string().default(''),
+  planReviewSound: z.string().default(''),
+  goalBlockedSound: z.string().default('bell'),
+  failureSound: z.string().default('alert'),
+})
+
+/** 一条批量写：set 写入用户层字段；unset 删除用户层字段（重新继承 base）。 */
+export function isSameOriginRequest(req) {
+  const headers = req.headers
+  // 无头请求（测试 fixture / 非浏览器客户端）放行：护栏只针对浏览器跨站请求。
+  if (headers === undefined) return true
+  const site = headers['sec-fetch-site']
+  if (typeof site === 'string' && site === 'cross-site') return false
+  const origin = headers.origin
+  if (typeof origin === 'string' && origin !== '' && origin !== 'null') {
+    const host = headers.host
+    if (typeof host !== 'string' || host === '') return false
     try {
-      if (event !== null && typeof event === "object" && event.type === "turn/end") {
-        broadcast({ type: "turn/end", at: Date.now() });
-      }
+      if (new URL(origin).host !== host) return false
     } catch {
+      return false
     }
-  });
-  ctx.effect(() => () => {
-    disposeEvents();
-    wss.close();
-  }, "dsh-notify-sound: teardown");
-  ctx.effect(() => ctx.webServer.register({
-    kind: "prefix",
-    path: API_PREFIX,
-    handler: async (req, res) => {
-      if (!fence(req)) {
-        writeError(res, 403, "forbidden", "forbidden");
-        return;
-      }
-      if (req.method !== "POST") {
-        writeError(res, 405, "method-error", "method not allowed");
-        return;
-      }
-      const pathname = new URL(req.url ?? "/", "http://dsh.internal").pathname;
-      const method = pathname.startsWith(API_PREFIX + "/") ? pathname.slice(API_PREFIX.length + 1) : void 0;
-      try {
-        if (method === "sounds.list") {
-          const names = (await readdir(SOUNDS_DIR)).filter((n) => SOUND_RE.test(n)).sort();
-          writeOk(res, { sounds: names });
-          return;
-        }
-        if (method === "prefs.get") {
-          writeOk(res, settingsFace.get());
-          return;
-        }
-        if (method === "prefs.update") {
-          const body = await readJsonBody(req);
-          const patch = body?.patch;
-          if (patch === null || typeof patch !== "object") {
-            writeError(res, 400, "bad-request", "patch object required");
-            return;
-          }
-          writeOk(res, await settingsFace.update(patch, body?.expectedRevision));
-          return;
-        }
-        writeError(res, 404, "not-found", "unknown notify-sound API method");
-      } catch (error) {
-        writeError(res, 500, "internal", error instanceof Error ? error.message : String(error));
-      }
-    }
-  }), "dsh-notify-sound: api routes");
-  ctx.effect(() => ctx.webServer.register({
-    kind: "prefix",
-    path: SOUND_PREFIX,
-    handler: async (req, res) => {
-      if (!fence(req)) {
-        res.writeHead(403);
-        res.end("forbidden");
-        return;
-      }
-      if (req.method !== "GET" && req.method !== "HEAD") {
-        res.writeHead(405);
-        res.end();
-        return;
-      }
-      const name2 = /^\/notify-sound\/sounds\/([a-z0-9-]+\.aac)$/.exec(new URL(req.url ?? "/", "http://dsh.internal").pathname)?.[1];
-      if (name2 === void 0) {
-        res.writeHead(404);
-        res.end("not found");
-        return;
-      }
-      try {
-        const info = await stat(join(SOUNDS_DIR, name2));
-        if (!info.isFile()) throw new Error("not a file");
-        const body = await readFile(join(SOUNDS_DIR, name2));
-        res.writeHead(200, {
-          "content-type": "audio/aac",
-          "cache-control": "public, max-age=86400",
-          "content-length": body.length
-        });
-        if (req.method === "HEAD") res.end();
-        else res.end(body);
-      } catch {
-        res.writeHead(404);
-        res.end("not found");
-      }
-    }
-  }), "dsh-notify-sound: sound files route");
-}
-async function readJsonBody(req) {
-  const chunks = [];
-  let total = 0;
-  for await (const chunk of req) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    total += buffer.length;
-    if (total > 1 << 20) throw new Error("request body too large");
-    chunks.push(buffer);
   }
-  const text = Buffer.concat(chunks).toString("utf8");
-  if (text.trim() === "") return {};
-  return JSON.parse(text);
+  return true
 }
-export {
-  PrefsSchema,
-  apply,
-  inject,
-  name
-};
+
+/** Write one JSON envelope response. */
+export function json(res, envelope, status = 200) {
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
+  res.end(JSON.stringify(envelope))
+}
+
+/** Read a bounded JSON request body; oversize / invalid / empty answers null. */
+export async function readJsonBody(req, cap) {
+  const chunks = []
+  let total = 0
+  for await (const chunk of req) {
+    const buffer = chunk
+    chunks.push(buffer)
+    total += buffer.length
+    if (total > cap) return null
+  }
+  const text = Buffer.concat(chunks).toString('utf8')
+  if (text === '') return null
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
+/** 读取 notify-sound 命名空间视图；命名空间或 settings 服务缺失时返回 null。 */
+export function buildSettingsView(ctx) {
+  const settings = ctx.get('settings')
+  if (settings === undefined) return null
+  const descriptor = settings.describe({ redactSecrets: true })
+    .find((entry) => String(entry.ns) === SETTINGS_NAMESPACE)
+  if (descriptor === undefined) return null
+  return {
+    ns: String(descriptor.ns),
+    value: descriptor.value,
+    base: descriptor.base,
+    user: descriptor.user,
+    revision: descriptor.revision,
+    writable: settings.writable,
+    secrets: (descriptor.secrets ?? []).map((secret) => ({ path: [...secret.path], set: secret.set })),
+  }
+}
+
+/**
+ * 应用一次批量写：克隆当前用户层 → 逐条 set/unset → settings.replace
+ * 整层提交（revision 栅栏，防多浏览器并发覆盖）。
+ * @param ctx - 注册上下文（settings 服务）。
+ * @param writes - 批量写列表。
+ * @returns 提交后的视图。
+ */
+export async function applySettingsWrites(ctx, writes) {
+  const settings = ctx.get('settings')
+  if (settings === undefined) throw new Error('settings service is absent')
+  const current = buildSettingsView(ctx)
+  if (current === null) throw new Error('notify-sound settings namespace is not registered')
+  const user = structuredClone(current.user ?? {})
+  for (const write of writes) {
+    if (write && typeof write === 'object' && typeof write.field === 'string') {
+      if (write.op === 'set') user[write.field] = write.value
+      else if (write.op === 'unset') delete user[write.field]
+    }
+  }
+  await settings.replace(settingsNamespace(SETTINGS_NAMESPACE), user, current.revision)
+  const next = buildSettingsView(ctx)
+  if (next === null) throw new Error('notify-sound settings namespace is not registered')
+  return next
+}
+
+/** 注册 /notify-sound/settings 路由（GET 视图 / POST 批量写，同源护栏）。 */
+export function registerSettingsRoute(ctx) {
+  const webserver = ctx.get('webServer')
+  if (webserver === undefined) return
+  webserver.register({
+    kind: 'exact',
+    path: SETTINGS_API_PATH,
+    handler: async (req, res) => {
+      if (!isSameOriginRequest(req)) {
+        json(res, { ok: false, error: { code: 'rejected', message: 'cross-site request rejected' } }, 403)
+        return
+      }
+      if (req.method === 'GET') {
+        const view = buildSettingsView(ctx)
+        if (view === null) {
+          json(res, { ok: false, error: { code: 'unavailable', message: 'notify-sound settings namespace is not available' } }, 404)
+          return
+        }
+        json(res, { ok: true, value: view })
+        return
+      }
+      if (req.method !== 'POST') {
+        json(res, { ok: false, error: { code: 'internal', message: 'only GET and POST are allowed' } }, 405)
+        return
+      }
+      const body = await readJsonBody(req, SETTINGS_BODY_CAP)
+      const writes = body === null ? undefined : body.writes
+      if (!Array.isArray(writes)) {
+        json(res, { ok: false, error: { code: 'rejected', message: 'request body must be a JSON object with a writes array' } }, 400)
+        return
+      }
+      try {
+        const view = await applySettingsWrites(ctx, writes)
+        json(res, { ok: true, value: view })
+      } catch (error) {
+        json(res, { ok: false, error: { code: 'rejected', message: error?.message ?? String(error) } }, 422)
+      }
+    },
+  })
+}
+
+export function apply(ctx, config = {}) {
+  // settings 服务在启动时异步加载文档后才可用；installSettingsSection 用
+  // ctx.inject 迟绑定：settings 就绪后（或早已就绪时立即）注册，完全没有
+  // settings 服务的 profile 中静默不注册。webServer 同理可选。
+  installSettingsSection(ctx, SETTINGS_NAMESPACE, Config, config, {
+    setSource: () => {},
+    onChange: () => {},
+    validate: () => {},
+  })
+  registerSettingsRoute(ctx)
+}

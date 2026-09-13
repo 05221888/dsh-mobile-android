@@ -1,0 +1,9 @@
+# dsh-mobile-nv-failover bundle patch.
+# Inserts a host-only plugin row that exposes /nv-failover/* routes for
+# settings load/save and a transparent OpenAI-compatible chat-completions
+# proxy. The proxy walks through the user's nvapi- key pool on every failure
+# (401/403/429/5xx/timeout), so a single dead or rate-limited key never breaks
+# a session.
+- insert:
+    - id: dsh-mobile-nv-failover
+      name: dsh-mobile-nv-failover

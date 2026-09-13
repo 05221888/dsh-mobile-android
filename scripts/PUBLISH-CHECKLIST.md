@@ -49,6 +49,31 @@ Invoke-RestMethod "https://gitee.com/api/v5/repos/$repo/contents/apk-manifest.js
 
 更新条件：`versionCode` 必须 > 手机当前 versionCode。**只要版本号 +1**（哪怕只是 bugfix），手机才会看到升级。
 
+## ⚠️ sha256 字段必须对应 url 指向的实际文件
+
+- `url` = `.apk` → `sha256` = APK 文件的 SHA256
+- `url` = `.apk.xz` → `sha256` = **xz 压缩包的 SHA256**（手机端 UpdateManager 直接对下载下来的文件校验，不会自动解压）
+
+代码证据：`UpdateManager.kt` L43-54 `downloadApk()`：
+
+```kotlin
+download(update.url, dest)        // dest 就是下载的原文件
+val actual = sha256(dest)
+if (!actual.equals(update.sha256, ignoreCase = true)) {
+  throw IllegalStateException("APK SHA256 不匹配")
+}
+```
+
+**Gitee 单附件上限 100MB**——APK > 100MB 时必须先 `xz` 压缩（128MB → 78MB），url 改 `.apk.xz`，sha256 必须算 xz 包：
+
+```powershell
+$apkSha = (Get-FileHash 'DSH-Mobile-0.15.0-debug.apk' -Algorithm SHA256).Hash.ToLower()
+$xzSha  = (Get-FileHash 'DSH-Mobile-0.15.0-debug.apk.xz' -Algorithm SHA256).Hash.ToLower()
+# 用 xzSha 写进 manifest 的 sha256 字段
+```
+
+实战坑：v0.15.0 发布时 url 已是 `.apk.xz`，但 manifest 的 sha256 误填了 APK 解压后的值 → 手机端 UpdateManager 直接报「APK SHA256 不匹配」。**sha256 与 url 必须同时指向同一文件**。
+
 ## 快照 manifest（manifest.json）小贴士
 
 只在换快照 tar.xz 后才更新它；不重发 apk 只是改 manifest 的话，发动即可，不用动 App。

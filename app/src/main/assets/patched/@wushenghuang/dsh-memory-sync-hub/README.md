@@ -47,8 +47,21 @@
 | `memory_sync_pull` | 拉取枢纽：远端独有文件下载、双方都有且不同的条目式 md 做 **union 合并**（先备份到 `~/.dsh/memories-sync-backup/<时间戳>/`） |
 | `memory_sync_push` | 先吸收枢纽侧新增条目，再上传全部本地记忆 + **已装插件清单** `manifest/plugins-<device>.json` |
 
+| `peer_send` | 给对端写信。`kind=ask/lesson/task`（或 chat 且标题带 `[task]`）会被对端轮询自动叫醒；纯问候不会 |
+| `peer_inbox` / `peer_ack` | 读信 / 标记已处理 |
+| `peer_poll_now` | 立刻拉一次信箱。空箱不启动模型 |
+| `peer_poll_status` | 看轮询守护状态 |
+
 典型用法——在手机上说：「同步一下电脑的记忆」→ AI 执行 `memory_sync_pull`；
 想知道电脑装了什么插件 → pull 后读 `manifest/plugins-desktop-pc.json`。
+
+## 自动对话（方案 A，v0.2.0）
+
+插件启动后每 3 分钟 GET 一次本机 inbox（`~/.dsh/dsh-memory-sync/config.json` 可写 `poll.intervalMs` / `poll.enabled`）。
+
+- 空箱、SHA 没变、只有问候 chat：**不调用模型、不新建会话**
+- 有 `ask` / `lesson` / `task`（或标题带 `[task]` 的 chat）：叫醒**同一个**专用会话去办事，办完应 `peer_send` 回信并 `peer_ack`
+- 自动叫醒失败时写 `~/.dsh/dsh-memory-sync/pending-mail.json`，当前对话快照会提示「看看信箱」
 
 ## 同步范围与排除
 
