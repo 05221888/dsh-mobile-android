@@ -1,0 +1,11 @@
+# Ultra-safe Android web profile patch — no shell-termux / ui-responsive.
+# Used when those rows keep crashing the cordis tree (Promise.allSettled).
+# Stock bash-sandbox + stock ui-layout so the engine can still bind :3080.
+- id: bash-sandbox
+  disabled: false
+- id: pwsh-sandbox
+  disabled: true
+- id: ui-layout
+  disabled: false
+- id: hmr
+  disabled: true

@@ -364,10 +364,32 @@ class EngineManager(private val context: Context, private val pickToken: String?
       File(dshPkgs, "dsh-client-modules/lib/index.js"), "dsh-mobile-bundle-hardening")
     applyAssetPatch("patched/vision-mcp-server.mjs",
       File(homeDir, "vision-mcp/server.mjs"), "Qwen-VL")
-    applyAssetPatchAppend("patched/cordis.patch.yml",
-      File(home, "profiles/web/cordis.patch.yml"), "mcp-vision")
+    // 每次启动先把 web cordis 重置成出厂工厂件，再按开关写入。
+    // 连续早夭 ≥2 次 → 换 ultra-safe 工厂件（去掉 shell-termux / ui-responsive）。
+    try {
+      val assetName = if (earlyCrashCount >= 2) {
+        "patched/factory-web-cordis.safe.patch.yml"
+      } else {
+        "patched/factory-web-cordis.patch.yml"
+      }
+      val factory = context.assets.open(assetName).bufferedReader().use { it.readText() }
+      val patchFile = File(home, "profiles/web/cordis.patch.yml")
+      patchFile.parentFile?.mkdirs()
+      patchFile.writeText(factory)
+      Log.w(TAG, "cordis factory reset: $assetName (earlyCrash=$earlyCrashCount)")
+    } catch (t: Throwable) {
+      Log.e(TAG, "factory cordis reset failed", t)
+    }
+    // 视觉 MCP 只有配了 key 才挂：空 key 起 stdio 子进程失败会拖垮 cordis fail-loud。
+    val hasVisionKey = File(context.filesDir, "dashscope-key.txt").takeIf { it.exists() }
+      ?.readText()?.trim()?.isNotEmpty() == true
+    if (hasVisionKey) {
+      applyAssetPatchAppend("patched/cordis.patch.yml",
+        File(home, "profiles/web/cordis.patch.yml"), "mcp-vision")
+    }
     applyAssetPatchAppend("patched/cordis-pwsh-fix.yml",
       File(home, "profiles/web/cordis.patch.yml"), "dsh-mobile-pwsh-fix")
+    ensureFactoryProfile(home)
     PluginCatalog.migrateDefaults(context)
     seedDesktopMemories()
     seedLeisureBook()
@@ -379,7 +401,66 @@ class EngineManager(private val context: Context, private val pickToken: String?
     // applyToggles 才会顺势把它从 cordis.patch.yml 里摘掉。
     val autoDisabled = ensurePluginDeps(home, plugins)
     PluginCatalog.applyToggles(context, home)
-    writeStartupReport(autoDisabled)
+    // 上次崩过：从 engine.log 原文读出到底哪条 entry 挂了，隔离后重试（收敛，不靠猜）。
+    val quarantined = applyQuarantine(home)
+    // patch 引用但引擎树里没有的插件补成引擎可见（loader 解析基准是引擎树）。
+    val linked = linkEngineVisiblePlugins(home)
+    writeStartupReport(autoDisabled, quarantined, linked)
+  }
+
+  /**
+   * cordis 工厂语义纠正（参考 kelai141 FactoryProfilePatch）。
+   *
+   * 快照出厂把 `ui-layout` 标成 disabled、改挂 ui-responsive。ui-responsive
+   * 缺失或坏掉时整棵布局树不 activate → 会话区空白 =「装完用不了」。
+   * 规则：
+   *  - ui-responsive 包健在 → 保留 disabled ui-layout（移动端布局）；
+   *  - ui-responsive 不在 → 强制 re-enable ui-layout，否则必黑屏。
+   */
+  private fun ensureFactoryProfile(home: File) {
+    try {
+      val patch = File(home, "profiles/web/cordis.patch.yml")
+      if (!patch.isFile) return
+      var text = patch.readText().replace("\r\n", "\n")
+      val webNm = File(home, "profiles/web/node_modules")
+      val topNm = File(home, "profiles/node_modules")
+      val responsiveOk = File(webNm, "@dsh-android/dsh-client-ui-responsive/package.json").isFile ||
+        File(topNm, "@dsh-android/dsh-client-ui-responsive/package.json").isFile
+      if (!responsiveOk) {
+        // 重开布局中枢：任何 disabled: true 的 ui-layout 行改回 false / 补写。
+        val lines = text.split("\n").toMutableList()
+        var i = 0
+        var found = false
+        while (i < lines.size) {
+          if (lines[i].trim().startsWith("id: ui-layout") ||
+            lines[i].trim().startsWith("- id: ui-layout")
+          ) {
+            found = true
+            var j = i + 1
+            var replaced = false
+            while (j < lines.size && lines[j].isNotBlank() && !lines[j].trim().startsWith("- ")) {
+              if (lines[j].trim().startsWith("disabled:")) {
+                lines[j] = lines[j].replace("disabled: true", "disabled: false")
+                replaced = true
+              }
+              j++
+            }
+            if (!replaced) lines.add(j, "  disabled: false")
+            break
+          }
+          i++
+        }
+        if (!found) lines.add("- id: ui-layout\n  disabled: false")
+        text = lines.joinToString("\n")
+        Log.w(TAG, "ui-responsive missing; re-enabled ui-layout")
+      }
+      if (!text.contains("dsh-mobile-pwsh-fix") && !text.contains("pwsh-sandbox")) {
+        // pwsh 禁用仍由 cordis-pwsh-fix 追加，这里不重复。
+      }
+      patch.writeText(if (text.endsWith("\n")) text else text + "\n")
+    } catch (t: Throwable) {
+      Log.e(TAG, "ensureFactoryProfile failed", t)
+    }
   }
 
   /**
@@ -407,23 +488,64 @@ class EngineManager(private val context: Context, private val pickToken: String?
         val dir = pluginDir(home, plugin)
         if (!dir.isDirectory) continue
         val entry = entryFileOf(dir) ?: continue
+        if (!entry.isFile || entry.length() == 0L) {
+          // 空壳 entry（拷贝中断/损坏）：加载必炸，直接当依赖缺失处理。
+          Log.e(TAG, "plugin " + plugin.name + " entry empty: " + entry.absolutePath)
+          if (!plugin.bootCritical) {
+            PluginCatalog.setEnabled(context, plugin, false)
+            disabled += plugin.name
+          }
+          continue
+        }
         val text = try {
-          if (entry.isFile) entry.readText() else null
+          entry.readText()
         } catch (_: Exception) {
           null
         } ?: continue
         val missing = mutableListOf<String>()
-        for (spec in bareImports(text)) {
-          if (resolvable(webNm, topNm, dir, spec)) continue
-          val borrowed = borrowBareDep(webNm, topNm, dshNm, spec)
-          if (borrowed || resolvable(webNm, topNm, dir, spec)) continue
-          // 借不到时再宽一点：只要引擎自己的 node_modules 里有同名/同名作用域包，
-          // 就认为"引擎有办法解析"，只记日志不关插件（避免误杀本来能跑的插件）。
-          if (existsInDsh(dshNm, spec)) {
-            Log.w(TAG, "spec " + spec + " 未能在 profile 内解析，但引擎自带该包，放行")
-            continue
+        // 入口 + 随包 node_modules 一层深度的裸 import 一起扫（递归只一层，
+        // 避免误把 package.json 字段当依赖）。
+        val scanFiles = mutableListOf(entry)
+        File(dir, "node_modules").listFiles()?.forEach { pkgDir ->
+          val name = pkgDir.name
+          if (name == ".bin" || name.startsWith(".")) return@forEach
+          val roots = if (name.startsWith("@")) {
+            pkgDir.listFiles()?.filter { it.isDirectory } ?: emptyList()
+          } else {
+            listOf(pkgDir)
           }
-          missing += spec
+          for (root in roots) {
+            if (!root.isDirectory) continue
+            val pj = File(root, "package.json")
+            val main = if (pj.isFile) try {
+              org.json.JSONObject(pj.readText()).optString("main")
+            } catch (_: Exception) { "" } else ""
+            val candidate = File(root, main.ifBlank { "lib/index.js" })
+            if (candidate.isFile && candidate.length() > 0) scanFiles += candidate
+            for (alt in listOf("index.js", "lib/index.mjs", "lib/index.cjs", "src/index.js")) {
+              val f = File(root, alt)
+              if (f.isFile && f.length() > 0) scanFiles += f
+            }
+          }
+        }
+        for (scan in scanFiles) {
+          val scanText = try {
+            if (scan.length() > 0 && scan.length() < 2_000_000) scan.readText() else null
+          } catch (_: Exception) {
+            null
+          } ?: continue
+          for (spec in bareImports(scanText)) {
+            if (resolvable(webNm, topNm, dir, spec)) continue
+            val borrowed = borrowBareDep(webNm, topNm, dshNm, spec)
+            if (borrowed || resolvable(webNm, topNm, dir, spec)) continue
+            // 借不到时再宽一点：只要引擎自己的 node_modules 里有同名/同名作用域包，
+            // 就认为"引擎有办法解析"，只记日志不关插件（避免误杀本来能跑的插件）。
+            if (existsInDsh(dshNm, spec)) {
+              Log.w(TAG, "spec " + spec + " 未能在 profile 内解析，但引擎自带该包，放行")
+              continue
+            }
+            if (!missing.contains(spec)) missing += spec
+          }
         }
         if (missing.isNotEmpty()) {
           Log.e(TAG, "plugin " + plugin.name + " 依赖缺失 [" + missing.joinToString(",") + "]")
@@ -545,8 +667,195 @@ class EngineManager(private val context: Context, private val pickToken: String?
   private fun existsInDsh(dshNm: File, spec: String): Boolean =
     File(dshNm, spec).exists() || File(dshNm, "@deepseek-ai/" + pkgRootOf(spec)).exists()
 
+  /**
+   * 隔离"上次把引擎拖垮的那条 entry"。
+   *
+   * cordis 是 fail-loud：只要有一条 entry import/apply 失败，整棵插件树倒、进程立刻退出
+   * （界面只能看到 Promise.allSettled 和堆栈尾巴）。到底是哪条，只有引擎自己的
+   * engine.log 写着，所以这里直接扫日志原文里的
+   *   failed to import loader entry <id> (<pkg>)   /   failed to apply ...
+   * 命中就把该 entry 从 cordis.patch.yml 摘掉：insert 块整块删、工厂行补 disabled，
+   * 并记进 SharedPreferences —— 下次启动 applyToggles 也不会再插回来。
+   * 于是重试是**收敛**的：每崩一次少一条坏 entry，而不是反复撞同一堵墙。
+   *
+   * 本机拿真快照复现过：把 sandbox 那一行 disabled，引擎立刻能 bind 端口、
+   * 其余 entry 全部就绪 ⇒ 失败的确实只是"某一条 entry"，不是整棵树。
+   * @return 本次隔离的 entry 名（写进启动报告）。
+   */
+  private fun applyQuarantine(home: File): List<String> {
+    val applied = mutableListOf<String>()
+    try {
+      val patch = File(home, "profiles/web/cordis.patch.yml")
+      if (!patch.isFile) return applied
+      val prefs = context.getSharedPreferences(QUARANTINE_PREFS, Context.MODE_PRIVATE)
+      val ids = java.util.HashSet(prefs.getStringSet(KEY_QUARANTINE, emptySet()) ?: emptySet())
+      val log = File(context.filesDir, "engine.log")
+      if (log.isFile && log.length() > 0) {
+        ids.addAll(quarantineIdsFromLog(log.readText().takeLast(400_000)))
+      }
+      if (ids.isEmpty()) return applied
+      prefs.edit().putStringSet(KEY_QUARANTINE, ids).apply()
+      val original = patch.readText()
+      var yml = original
+      for (id in ids) {
+        val before = yml
+        yml = stripInsertBlock(yml, id)
+        if (yml != before) {
+          applied += id
+        } else if (hasFactoryRow(yml, id) && !hasDisabledRow(yml, id)) {
+          yml = yml.trimEnd() + "\n" + "- id: " + id + "\n" + "  disabled: true" + "\n"
+          applied += id
+        }
+      }
+      if (yml != original) {
+        patch.writeText(if (yml.endsWith("\n")) yml else yml + "\n")
+        Log.w(TAG, "quarantined entries: " + applied.joinToString(", "))
+      }
+      if (applied.isNotEmpty()) {
+        for (plugin in PluginCatalog.list(context)) {
+          if (applied.any { it == plugin.id || it == plugin.name }) {
+            PluginCatalog.setEnabled(context, plugin, false)
+          }
+        }
+      }
+    } catch (t: Throwable) {
+      Log.e(TAG, "applyQuarantine failed", t)
+    }
+    return applied
+  }
+
+  /** 从 engine.log 扫出"加载失败的 entry id"（纯字符串扫描，不用正则，避免转义坑）。 */
+  private fun quarantineIdsFromLog(text: String): Set<String> {
+    val out = linkedSetOf<String>()
+    for (marker in listOf(
+      "failed to import loader entry ",
+      "failed to apply loader entry ",
+    )) {
+      var i = text.indexOf(marker)
+      while (i >= 0) {
+        val rest = text.substring(i + marker.length)
+        val cuts = listOf(rest.indexOf(' '), rest.indexOf('('), rest.indexOf('\n'))
+          .filter { it > 0 }
+        val end = cuts.minOrNull() ?: minOf(rest.length, 64)
+        val id = rest.substring(0, end).trim()
+        if (id.isNotEmpty() && id != "include") out += id
+        i = text.indexOf(marker, i + marker.length)
+      }
+    }
+    return out
+  }
+
+  /** 工厂行：顶层 `- id: <id>`。 */
+  private fun hasFactoryRow(yml: String, id: String): Boolean {
+    for (line in yml.split('\n')) {
+      if (line.trim() == "- id: " + id) return true
+    }
+    return false
+  }
+
+  /** 该工厂行下面是否已经是 disabled: true。 */
+  private fun hasDisabledRow(yml: String, id: String): Boolean {
+    val lines = yml.split('\n')
+    for (k in lines.indices) {
+      if (lines[k].trim() == "- id: " + id && k + 1 < lines.size &&
+        lines[k + 1].trim() == "disabled: true"
+      ) {
+        return true
+      }
+    }
+    return false
+  }
+
+  /** 整块删掉一个 `- insert:` 块（块内出现该 id 才算命中）。 */
+  private fun stripInsertBlock(text: String, id: String): String {
+    val lines = text.split('\n')
+    val out = ArrayList<String>(lines.size)
+    var i = 0
+    while (i < lines.size) {
+      if (lines[i].trim() == "- insert:") {
+        var j = i + 1
+        val block = StringBuilder(lines[i])
+        while (j < lines.size && (lines[j].isBlank() ||
+            lines[j].startsWith(" ") || lines[j].startsWith("\t"))
+        ) {
+          block.append('\n').append(lines[j])
+          j++
+        }
+        block.append('\n')
+        if (block.contains("id: " + id + "\n") || block.contains("id: '" + id + "'")) {
+          i = j
+          continue
+        }
+        out.add(lines[i])
+        i++
+        continue
+      }
+      out.add(lines[i])
+      i++
+    }
+    return out.joinToString("\n")
+  }
+
+  /**
+   * 把 cordis.patch.yml 引用、但引擎树里没有的插件，链接进引擎自己的 node_modules。
+   * 本机复现过 loader 的解析基准就是引擎树（报错原文 imported from
+   * .../dsh/node_modules/@deepseek-ai/cordis-plugin-loader/lib/index.js）。
+   * 缺谁补谁，已能解析的跳过；失败只记日志，不阻断启动。
+   * @return 本次新建的链接名。
+   */
+  private fun linkEngineVisiblePlugins(home: File): List<String> {
+    val linked = mutableListOf<String>()
+    try {
+      val engineNm = File(usrDir, "lib/node_modules/@deepseek-ai/dsh/node_modules")
+      val webNm = File(home, "profiles/web/node_modules")
+      val topNm = File(home, "profiles/node_modules")
+      val patch = File(home, "profiles/web/cordis.patch.yml")
+      if (!patch.isFile || !engineNm.isDirectory) return linked
+      for (name in patchPluginNames(patch.readText())) {
+        if (File(engineNm, name).exists()) continue
+        val src = listOf(webNm, topNm).map { File(it, name) }.firstOrNull { it.exists() } ?: continue
+        val dst = File(engineNm, name)
+        if (dst.exists()) continue
+        dst.parentFile?.mkdirs()
+        try {
+          Files.createSymbolicLink(dst.toPath(), src.toPath())
+          linked += name
+        } catch (t: Throwable) {
+          try {
+            src.copyRecursively(dst, overwrite = false)
+            linked += name
+          } catch (e: Exception) {
+            Log.e(TAG, "engine-visible link failed: " + name, e)
+          }
+        }
+      }
+      if (linked.isNotEmpty()) Log.w(TAG, "engine-visible links: " + linked.joinToString(", "))
+    } catch (t: Throwable) {
+      Log.e(TAG, "linkEngineVisiblePlugins failed", t)
+    }
+    return linked
+  }
+
+  /** 抽出 cordis patch 里所有 name: 值（去引号、去 cordis: 内置件）。 */
+  private fun patchPluginNames(yml: String): Set<String> {
+    val out = linkedSetOf<String>()
+    for (line in yml.split('\n')) {
+      val t = line.trim()
+      if (!t.startsWith("name:")) continue
+      var v = t.substring(5).trim()
+      v = v.trim('"').trim('\'').trim()
+      if (v.isEmpty() || v.startsWith("cordis:")) continue
+      out += v
+    }
+    return out
+  }
+
   /** 启动报告（插件自动关闭 / 引擎日志尾巴），排障时给用户一份可复制的文本。 */
-  private fun writeStartupReport(autoDisabled: List<String>) {
+  private fun writeStartupReport(
+    autoDisabled: List<String>,
+    quarantined: List<String> = emptyList(),
+    linked: List<String> = emptyList(),
+  ) {
     try {
       val sb = StringBuilder()
       sb.append("dsh-mobile 启动报告  ").append(java.util.Date()).append('\n')
@@ -556,6 +865,12 @@ class EngineManager(private val context: Context, private val pickToken: String?
       } else {
         sb.append("插件依赖预检: 以下插件因依赖缺失被自动关闭 → ")
           .append(autoDisabled.joinToString(", ")).append('\n')
+      }
+      if (quarantined.isNotEmpty()) {
+        sb.append("已隔离（上次拖垮引擎的 entry）→ ").append(quarantined.joinToString(", ")).append("\n")
+      }
+      if (linked.isNotEmpty()) {
+        sb.append("已补引擎可见链接 → ").append(linked.joinToString(", ")).append("\n")
       }
       val log = File(context.filesDir, "engine.log")
       if (log.isFile && log.length() > 0) {
@@ -830,6 +1145,48 @@ class EngineManager(private val context: Context, private val pickToken: String?
     }
   }
 
+  /**
+   * 裸引擎修复：关掉 mcp-vision 插件行，确保 ui-layout 可用，
+   * 供四级兜底在重启前调用。不删 shell-termux / pwsh-fix 等工厂块。
+   */
+  fun applyBareBootRepairs() {
+    try {
+      val home = File(homeDir, ".dsh")
+      val patch = File(home, "profiles/web/cordis.patch.yml")
+      if (patch.isFile) {
+        var text = patch.readText().replace("\r\n", "\n")
+        // 整块删除 mcp-vision insert（空 key 或加载失败时会拖垮 cordis）。
+        val lines = text.split("\n").toMutableList()
+        val out = ArrayList<String>(lines.size)
+        var i = 0
+        while (i < lines.size) {
+          val line = lines[i]
+          if (line.trim() == "- insert:" && i + 2 < lines.size &&
+            lines[i + 1].contains("mcp-vision") &&
+            lines[i + 2].contains("dsh-mcp-client")
+          ) {
+            i += 3
+            // 跳过 config 块（缩进更深的连续行）
+            while (i < lines.size && (lines[i].isBlank() || lines[i].startsWith(" ") || lines[i].startsWith("\t"))) {
+              // 只吞属于本 insert 的缩进行；顶层 "- " 开头停下
+              if (lines[i].trim().startsWith("- ") && lines[i].trim() != "- insert:") break
+              i++
+            }
+            continue
+          }
+          out.add(line)
+          i++
+        }
+        text = out.joinToString("\n")
+        patch.writeText(if (text.endsWith("\n")) text else text + "\n")
+        Log.w(TAG, "bare boot: stripped mcp-vision from cordis.patch.yml")
+      }
+      ensureFactoryProfile(home)
+    } catch (t: Throwable) {
+      Log.e(TAG, "applyBareBootRepairs failed", t)
+    }
+  }
+
   /** Start the dsh web engine from the embedded snapshot. */
   fun startEngine(port: Int = 3080): Boolean {
     // LD_PRELOAD 依赖快照内的 termux-exec 库：缺失时所有子进程 exec 会失败，
@@ -839,30 +1196,74 @@ class EngineManager(private val context: Context, private val pickToken: String?
       Log.e(TAG, "engine start failed: termux-exec preload missing at " + preload.absolutePath)
       return false
     }
-    val now = System.currentTimeMillis()
     // 进程级 CAS：并发调用只有一个能真正启动（设备实证 EADDRINUSE 双启动）。
-    if (!STARTING.compareAndSet(false, true)) return true
-    // 冷却窗口：上次尝试后 90s 内不重复启动（冷启动 boot 需 20-45s）。
-    if (now - EngineManager.lastStartAttemptAt < START_COOLDOWN_MS) {
-      STARTING.set(false)
-      return true
+    if (!STARTING.compareAndSet(false, true)) {
+      return EngineProbe.check(200).optBoolean("running", false)
     }
     return try {
+      // 已有进程还活着且探活通过 → 真成功，不必再 spawn。
+      val existing = engineProcess
+      if (existing != null && existing.isAlive) {
+        if (EngineProbe.check(400).optBoolean("running", false)) {
+          earlyCrashCount = 0
+          return true
+        }
+        // 进程在但探活失败：杀掉重来，不进 90s 假死冷却。
+        existing.destroy()
+        engineProcess = null
+        EngineManager.lastStartAttemptAt = 0
+      } else if (existing != null) {
+        // 僵尸 Process 对象：清掉并放开冷却，否则看门狗 90s 内只能空转 return true。
+        engineProcess = null
+        EngineManager.lastStartAttemptAt = 0
+      }
+
+      val now = System.currentTimeMillis()
+      val processAlive = engineProcess?.isAlive == true
+      if (processAlive && now - EngineManager.lastStartAttemptAt < START_COOLDOWN_MS) {
+        return true
+      }
+
       applyRuntimePatches()
-      // 启动 Shizuku 桥接服务器（dsh-android-control 插件通过 HTTP 发送
-      // android_* 命令到本地桥；Shizuku 不可用时插件会回退 su 通道）。
       ShizukuManager.ensureBridgeRunning(context)
+      // 清残留 bin.js（EADDRINUSE / 旧插件树占端口）。
+      try {
+        Runtime.getRuntime().exec(arrayOf("/system/bin/pkill", "-f", "bin.js")).waitFor()
+      } catch (_: Throwable) {
+      }
+      Thread.sleep(400)
+
       val args = arrayOf(
         nodeBin.absolutePath, "--expose-internals", dshBin.absolutePath, "web", "--port", port.toString(),
       )
-      engineProcess = startWithArgs(args, shellEnv())
-      // 冷却只在真实启动后写入：失败路径不占用冷却窗口（可立即重试）。
+      val proc = startWithArgs(args, shellEnv())
+      engineProcess = proc
       EngineManager.lastStartAttemptAt = now
-      LogCollector.log(TAG, "engine started")
+      LogCollector.log(TAG, "engine spawned pid-ish alive=" + proc.isAlive)
+      // 早夭检测：15s 内退出立刻清冷却；连崩 2 次切 ultra-safe cordis。
+      Thread {
+        try {
+          val code = proc.waitFor()
+          val age = System.currentTimeMillis() - EngineManager.lastStartAttemptAt
+          Log.w(TAG, "engine process exited code=$code ageMs=$age")
+          LogCollector.log(TAG, "engine process exited code=$code ageMs=$age")
+          if (engineProcess === proc) {
+            engineProcess = null
+            if (age < 15_000) {
+              EngineManager.lastStartAttemptAt = 0
+              earlyCrashCount++
+              Log.w(TAG, "early crash #$earlyCrashCount")
+              LogCollector.log(TAG, "early crash #$earlyCrashCount")
+            }
+          }
+        } catch (_: Throwable) {
+        }
+      }.start()
       true
     } catch (t: Throwable) {
       Log.e(TAG, "engine start failed", t)
       LogCollector.log(TAG, "engine start FAILED: " + (t.message ?: t.javaClass.simpleName))
+      EngineManager.lastStartAttemptAt = 0
       false
     } finally {
       STARTING.set(false)
@@ -891,6 +1292,9 @@ class EngineManager(private val context: Context, private val pickToken: String?
       build(listOf("/system/bin/linker64") + args.toList()).start()
     }
   }
+
+  /** 引擎进程是否已退出（兜底流程用它避免死等满超时：cordis 崩是秒退）。 */
+  val engineExited: Boolean get() = engineProcess?.isAlive != true
 
   /** Stop the engine process (best-effort). */
   fun stopEngine() {
@@ -955,6 +1359,10 @@ class EngineManager(private val context: Context, private val pickToken: String?
     /** 插件树完整性标记（写在插件目录里；版本/文件数/App versionCode 三者全中才跳过重铺）。 */
     private const val PLUGIN_MARKER = ".dsh-bundled.json"
 
+    /** 隔离集合（SharedPreferences）：上次把引擎拖垮、下次启动不再挂的 entry id。 */
+    private const val QUARANTINE_PREFS = "dsh_engine_quarantine"
+    private const val KEY_QUARANTINE = "entries"
+
     /** Watchdog/retry backoff: no new start within this window of the last
      *  attempt. Cold node boot on the phone takes 20-45s (plugin tree + first
      *  bind); a 5s watchdog poll would otherwise race a healthy boot and
@@ -968,6 +1376,11 @@ class EngineManager(private val context: Context, private val pickToken: String?
     /** 上次真实启动时刻（epoch ms）；watchdog 冷却窗口基准。 */
     @Volatile
     var lastStartAttemptAt: Long = 0
+
+    /** 15s 内早夭次数；≥2 时改用 ultra-safe cordis（去掉 Android 专用插件行）。 */
+    @Volatile
+    @JvmStatic
+    var earlyCrashCount: Int = 0
 
     /**
      * 进程级共享的目录选择鉴权 token（C1 修复，2026-08-16）：

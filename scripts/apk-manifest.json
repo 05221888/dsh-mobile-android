@@ -1,10 +1,10 @@
 {
-  "versionCode": 34,
-  "versionName": "0.15.3",
-  "url": "https://gitee.com/wushenghuang/dsh-mobile-releases/releases/download/apk-v0.15.3/DSH-Mobile-0.15.3-debug.apk",
-  "sha256": "ad9bbcf3957fd50175a81d61d1608fae034f03a0a8bd46c8aaa53ad6bc0c9a99",
-  "size": 81838589,
+  "versionCode": 39,
+  "versionName": "0.15.8",
+  "url": "https://gitee.com/wushenghuang/dsh-mobile-releases/releases/download/apk-v0.15.8/DSH-Mobile-0.15.8-debug.apk",
+  "sha256": "bd5be8e38d71a077849a8b94e9103d3ae01a7bea2f701bb8cf9cb3b3032f0448",
+  "size": 81745331,
   "format": "apk",
   "decompressionHint": "已是 .apk，无需解压",
-  "notes": "v0.15.3 真正修好「用不了」。v0.15.2 的漏洞：只在插件版本不同时才重铺，而手机上坏掉的生图插件恰好也是 1.5.1 （版本相同、随包 node_modules 丢失）→ 被跳过 → 依旧起不来。本版三层保险：① 插件树完整性标记（版本+文件数+App versionCode），老目录一律重铺一次；② 插件依赖预检——裸 import 找不到就从引擎自带 node_modules 借（symlink，含裸名→@deepseek-ai/名映射，悬空链接自动替换），实在借不到就自动关掉该插件，绝不让引擎起不来；③ 三级启动兜底 全开→safe→最小集（75s/60s/60s）。另新增 startup-report.txt 启动报告便于排障。下载 https://gitee.com/wushenghuang/dsh-mobile-releases/releases/download/apk-v0.15.3/DSH-Mobile-0.15.3-debug.apk 。"
+  "notes": "v0.15.8：不再靠猜哪条插件坏。每次启动读 engine.log 原文里的 failed to (import|apply) loader entry <id>，把这条坏 entry 从 cordis.patch.yml 摘掉并记住（收敛重试，每崩一次少一条）；再把 patch 引用但引擎树没有的插件补成引擎可见；引擎进程退出即结束等待、不再空等 75s。本机用同一份 snapshot 真跑引擎验证：按上述隔离后 HTTP 200。下载 https://gitee.com/wushenghuang/dsh-mobile-releases/releases/download/apk-v0.15.8/DSH-Mobile-0.15.8-debug.apk 。"
 }

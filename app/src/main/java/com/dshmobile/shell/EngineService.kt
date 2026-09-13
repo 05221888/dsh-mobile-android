@@ -48,16 +48,23 @@ class EngineService : Service() {
 
   /** Start the engine if not running, then arm the watchdog. */
   private fun ensureEngine() {
-    if (EngineProbe.check().optBoolean("running", false)) return
+    if (EngineProbe.check().optBoolean("running", false)) {
+      EngineManager.earlyCrashCount = 0
+      return
+    }
     if (engineManager.engineReady && engineManager.startEngine()) {
       // Watchdog: poll every 5s; if the engine process dies, restart it.
       if (watchdog == null) {
         watchdog = Executors.newSingleThreadScheduledExecutor().also { exec ->
           exec.scheduleWithFixedDelay({
             if (!EngineProbe.check().optBoolean("running", false) && engineManager.engineReady) {
+              // 连崩时放慢节奏（早夭已清冷却，避免 5s 狂拉加重崩溃循环）。
+              val delay = if (EngineManager.earlyCrashCount >= 2) 15_000L else 8_000L
+              Thread.sleep(delay)
+              EngineManager.lastStartAttemptAt = 0
               engineManager.startEngine()
             }
-          }, 5, 5, TimeUnit.SECONDS)
+          }, 8, 8, TimeUnit.SECONDS)
         }
       }
     }

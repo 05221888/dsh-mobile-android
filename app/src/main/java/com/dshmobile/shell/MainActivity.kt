@@ -75,6 +75,11 @@ class MainActivity : ComponentActivity() {
           if (!::webView.isInitialized || !::guideView.isInitialized) return@runOnUiThread
           if (!running && webView.visibility == View.VISIBLE) {
             engineStatus.text = "引擎未运行，正在自动恢复…"
+            // 引擎掉线时立刻放开启动冷却并拉一把，避免 90s 假死。
+            EngineManager.lastStartAttemptAt = 0
+            Thread {
+              try { engineManager.startEngine() } catch (_: Exception) {}
+            }.start()
             showGuide()
           } else if (running && guideView.visibility == View.VISIBLE) {
             showWeb()
@@ -1158,17 +1163,23 @@ class MainActivity : ComponentActivity() {
   private fun waitForEngine(seconds: Int): Boolean {
     for (i in 0 until seconds) {
       if (EngineProbe.check().optBoolean("running", false)) return true
+      // 进程已经死了就别死等满：cordis fail-loud 是秒退，白等只会把"启动中"拖长，
+      // 也拖慢隔离坏 entry 后重试的节奏。前 3 秒留缓冲，避开刚 spawn 的窗口。
+      if (i >= 3 && engineManager.engineExited) return false
       Thread.sleep(1000)
     }
     return false
   }
 
   /**
-   * 三级启动兜底：全部开关 → 只留 safe 插件 → 只留 bootCritical 插件。
+   * 四级启动兜底：
+   *  1) 当前开关集合
+   *  2) 只留 safe
+   *  3) 只留 bootCritical
+   *  4) 裸引擎：目录插件全关 + 剥 mcp-vision + 修 ui-layout
    *
-   * 一级超时基本都是桌面插件（notify-sound / imagegen）在加载阶段崩了。
-   * 二级仍超时说明"被标成 safe 的插件其实有毒"（v0.15.x imagegen 就是），
-   * 三级把所有可选项全关，保证用户至少能进聊天。
+   * 0.15.4 起默认已是 bootCritical-only，所以正常用户卡在第 1 级就能进；
+   * 第 4 级专治「连 bootCritical / 快照自带插件都毒」的极端情况。
    */
   private fun waitForEngineOrFallback(): Boolean {
     if (!engineManager.startEngine()) return false
@@ -1181,6 +1192,11 @@ class MainActivity : ComponentActivity() {
 
     runOnUiThread { engineStatus.text = "安全模式仍超时，正在用最小插件集启动…" }
     PluginCatalog.enableMinimalSet(this)
+    if (restartEngineAndWait()) return true
+
+    runOnUiThread { engineStatus.text = "最小集仍失败，正在裸引擎启动…" }
+    PluginCatalog.enableNone(this)
+    engineManager.applyBareBootRepairs()
     return restartEngineAndWait()
   }
 
@@ -1341,7 +1357,7 @@ class MainActivity : ComponentActivity() {
       crashBanner.visibility = View.VISIBLE
       crashBanner.text = "上次异常退出：$crash"
     }
-    val tail = tailEngineLog(8)
+    val tail = tailEngineLog(40)
     if (tail.isNotEmpty()) {
       logSummary.visibility = View.VISIBLE
       logSummary.text = "engine.log 末尾：\n$tail"
@@ -1350,12 +1366,25 @@ class MainActivity : ComponentActivity() {
     }
   }
 
-  /** engine.log 尾部摘要（测试界面诊断用；缺失/不可读返回空）。 */
+  /**
+   * engine.log 尾部摘要：优先保留含 Error/failed/ENOENT 的行 + 最后 N 行，
+   * 避免界面只显示 Promise.allSettled 堆栈尾巴、看不到真正报错。
+   */
   private fun tailEngineLog(lines: Int): String {
     val f = File(filesDir, "engine.log")
     if (!f.exists()) return ""
     return try {
-      f.readLines().takeLast(lines).joinToString("\n")
+      val all = f.readLines()
+      val keyword = Regex(
+        """Error|error|failed|ENOENT|EACCES|Cannot find|AggregateError|loader entries|at async""",
+        RegexOption.IGNORE_CASE,
+      )
+      val hits = all.filter { keyword.containsMatchIn(it) }.takeLast(25)
+      val last = all.takeLast(lines)
+      val merged = LinkedHashSet<String>()
+      merged.addAll(hits)
+      merged.addAll(last)
+      merged.joinToString("\n").take(4000)
     } catch (_: Exception) {
       ""
     }

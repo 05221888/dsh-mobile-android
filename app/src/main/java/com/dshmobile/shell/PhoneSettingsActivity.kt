@@ -105,23 +105,43 @@ class PhoneSettingsActivity : ComponentActivity() {
           return@Thread
         }
         runOnUiThread { status.text = "发现 " + update.versionName + "，正在下载…" }
-        // 1) 下载。文件名按真实内容起名：url 是 .apk.xz → 用 .apk.xz。
-        val compressed = File(filesDir, "dsh-update.apk.xz")
-        mgr.downloadApk(update, compressed) { msg -> runOnUiThread { status.text = msg } }
-        runOnUiThread { status.text = "下载完成，正在解压…" }
+        // 1) 下载到临时文件。url 可能是 .apk（≤100MB）或 .apk.xz（超限压缩）。
+        val downloaded = File(filesDir, "dsh-update-download")
+        mgr.downloadApk(update, downloaded) { msg -> runOnUiThread { status.text = msg } }
 
-        // 2) 解压 xz → 真 APK。
-        //    Gitee 附件上限 100MB，APK 128MB 必须 xz 压缩后再上传；
-        //    Android 系统安装器只认 .apk，xz 流会被拒为「解析软件包失败 (33) PackageInfo is null」。
+        // 2) 按魔数识别格式，禁止无条件 xz 解压。
+        //    APK/ZIP = PK\x03\x04；XZ = \xFD7zXZ\x00。
+        //    v0.15.1~0.15.4 事故：url 已是裸 .apk，却仍硬走 XZCompressorInputStream
+        //    → 「Input is not in the xz format」。
         val apk = File(filesDir, "dsh-update.apk")
-        compressed.inputStream().use { raw ->
-          BufferedInputStream(raw).use { buf ->
-            XZCompressorInputStream(buf).use { xz ->
-              apk.outputStream().use { out -> xz.copyTo(out) }
+        val magic = ByteArray(6)
+        downloaded.inputStream().use { it.read(magic) }
+        val isZip = magic[0] == 'P'.code.toByte() && magic[1] == 'K'.code.toByte()
+        val isXz = magic[0] == 0xFD.toByte() && magic[1] == '7'.code.toByte() &&
+          magic[2] == 'z'.code.toByte() && magic[3] == 'X'.code.toByte() &&
+          magic[4] == 'Z'.code.toByte() && magic[5] == 0x00.toByte()
+        when {
+          isZip -> {
+            runOnUiThread { status.text = "下载完成（APK），准备安装…" }
+            if (apk.exists() && !apk.delete()) { /* best-effort */ }
+            downloaded.renameTo(apk)
+          }
+          isXz -> {
+            runOnUiThread { status.text = "下载完成，正在解压…" }
+            downloaded.inputStream().use { raw ->
+              BufferedInputStream(raw).use { buf ->
+                XZCompressorInputStream(buf).use { xz ->
+                  apk.outputStream().use { out -> xz.copyTo(out) }
+                }
+              }
             }
+            downloaded.delete()
+          }
+          else -> {
+            downloaded.delete()
+            throw IllegalStateException("下载文件不是 APK/XZ 格式")
           }
         }
-        compressed.delete()
 
         // 3) 真 APK 给安装器。
         val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", apk)
@@ -131,7 +151,7 @@ class PhoneSettingsActivity : ComponentActivity() {
           addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         runOnUiThread {
-          status.text = "解压完成，即将打开安装器（覆盖安装，不要卸载）"
+          status.text = "即将打开安装器（覆盖安装，不要卸载）"
           startActivity(intent)
         }
       } catch (t: Throwable) {

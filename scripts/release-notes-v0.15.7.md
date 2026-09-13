@@ -1,0 +1,10 @@
+v0.15.7：打断「引擎未运行→自动恢复」死循环。
+
+根因：cordis 插件 Promise.allSettled 失败后进程立刻退出；看门狗 5s 又拉，无限重启；界面只显示堆栈尾巴看不到真错误。
+
+修复：
+1) 15s 内连续早夭 ≥2 次 → 自动切 ultra-safe cordis（去掉 shell-termux / ui-responsive，回到官方 bash-sandbox + ui-layout）
+2) 探活成功后清零早夭计数；失败重启间隔 8–15s，不再 5s 狂拉
+3) engine.log 摘要改为优先显示 Error/failed 行 + 末尾 40 行，便于定位具体插件
+
+覆盖安装后：等约 1 分钟（会自动尝试两次再切安全模式）。若仍失败，把引导页上的 engine.log 摘要截图发我。

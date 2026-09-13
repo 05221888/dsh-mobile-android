@@ -1,0 +1,15 @@
+v0.15.6 修「引擎未运行，正在自动恢复」卡死。
+
+根因：
+1) 探活只认 HTTP 200，启动中 401/404/503 被当成死引擎；
+2) startEngine 在 90s 冷却窗口内直接 return true 却不拉起进程 → 看门狗空转；
+3) 旧 stripInsert 只删 3 行，config 孤儿行会弄坏 cordis YAML。
+
+修复：
+- 任意 HTTP 响应都算引擎在；
+- 冷却仅在进程仍存活时生效；进程死/僵尸立刻清冷却；
+- 15s 内早夭自动清冷却；探活失败强制重启；
+- 每次启动把 web cordis 重置为出厂工厂件再按开关写入；
+- stripInsert 吞掉完整 insert 块（含 config 子树）。
+
+覆盖安装 0.15.6，不要卸载。若仍失败请发 startup-report.txt。

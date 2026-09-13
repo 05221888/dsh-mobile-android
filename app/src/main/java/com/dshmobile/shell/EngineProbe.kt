@@ -20,11 +20,15 @@ object EngineProbe {
       conn.connectTimeout = timeoutMs
       conn.readTimeout = timeoutMs
       conn.requestMethod = "GET"
+      conn.instanceFollowRedirects = false
       val start = System.currentTimeMillis()
+      // 任意 HTTP 响应都算「引擎在」：dsh 启动中/未登录可能是 401/404/503/302。
+      // 只认 200 会把「进程活着但还在 boot」误判成死引擎，触发冷却假死。
       val code = conn.responseCode
       conn.disconnect()
       JSONObject()
-        .put("running", code == 200)
+        .put("running", true)
+        .put("code", code)
         .put("latencyMs", System.currentTimeMillis() - start)
     } catch (e: Exception) {
       JSONObject().put("running", false).put("error", e.message ?: "unknown")

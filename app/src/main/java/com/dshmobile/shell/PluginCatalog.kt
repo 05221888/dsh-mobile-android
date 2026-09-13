@@ -24,12 +24,16 @@ object PluginCatalog {
 
   fun migrateDefaults(context: Context) {
     val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-    if (prefs.getInt(SCHEMA, 0) >= 2) return
+    val schema = prefs.getInt(SCHEMA, 0)
+    if (schema >= 3) return
     val edit = prefs.edit()
+    // v3：升级时一律回到 bootCritical-only。旧版本把 imagegen/memory-evolve 等
+    // 重型插件默认打开，坏依赖一崩整棵 cordis 树倒，手机直接进不去聊天。
+    // 用户可在「手机设置」里按需重新打开。
     for (plugin in list(context)) {
-      if (!plugin.defaultEnabled) edit.putBoolean(plugin.id, false)
+      edit.putBoolean(plugin.id, plugin.bootCritical)
     }
-    edit.putInt(SCHEMA, 2).apply()
+    edit.putInt(SCHEMA, 3).apply()
   }
 
   fun list(context: Context): List<CatalogPlugin> {
@@ -91,6 +95,19 @@ object PluginCatalog {
     prefs.apply()
   }
 
+  /**
+   * 四级兜底：目录内全部可选插件关闭（含 bootCritical）。
+   * 只保留快照自带的 shell-termux / ui-responsive；若连它们也拖垮引擎，
+   * EngineManager 会再修 cordis 工厂语义（重开 ui-layout）。
+   */
+  fun enableNone(context: Context) {
+    val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+    for (plugin in list(context)) {
+      prefs.putBoolean(plugin.id, false)
+    }
+    prefs.apply()
+  }
+
   fun enabledNames(context: Context): Set<String> =
     list(context).filter { isEnabled(context, it) }.map { it.name }.toSet()
 
@@ -118,20 +135,40 @@ object PluginCatalog {
     return "- insert:\n    - id: '" + plugin.id + "'\n      name: '" + plugin.name + "'\n"
   }
 
+  /**
+   * 删除一个 insert 块：必须吞掉 `- insert:` 之后所有缩进更深的行（含 config 子树）。
+   * 旧实现只删 3 行，配置键会变成孤儿 → js-yaml 解析失败 → cordis fail-loud → 引擎起不来。
+   */
   private fun stripInsert(text: String, plugin: CatalogPlugin): String {
-    val lines = text.replace("\r\n", "\n").split("\n").toMutableList()
-    val out = ArrayList<String>()
+    val lines = text.replace("\r\n", "\n").split("\n")
+    val out = ArrayList<String>(lines.size)
     var i = 0
     while (i < lines.size) {
       val line = lines[i]
       if (line.trim() == "- insert:" && i + 2 < lines.size) {
-        val idLine = lines[i + 1]
-        val nameLine = lines[i + 2]
-        val hit = idLine.contains("'" + plugin.id + "'") ||
-          nameLine.contains("'" + plugin.name + "'") ||
-          nameLine.contains(plugin.name)
-        if (hit) {
-          i += 3
+        val block = ArrayList<String>()
+        var j = i
+        // 整块：当前行 + 后续缩进更深或空行（直到下一项顶层）
+        while (j < lines.size) {
+          val cur = lines[j]
+          if (j > i) {
+            if (cur.isBlank()) {
+              // 空行先记着；若后面还有缩进行则属于本块
+              if (j + 1 < lines.size && (lines[j + 1].startsWith(" ") || lines[j + 1].startsWith("\t"))) {
+                block.add(cur); j++; continue
+              }
+              break
+            }
+            val indented = cur.startsWith(" ") || cur.startsWith("\t")
+            if (!indented) break
+          }
+          block.add(cur)
+          j++
+        }
+        val joined = block.joinToString("\n")
+        val hit = joined.contains(plugin.id) || joined.contains(plugin.name)
+        if (hit && block.size >= 3) {
+          i = j
           if (i < lines.size && lines[i].isBlank()) i++
           continue
         }
