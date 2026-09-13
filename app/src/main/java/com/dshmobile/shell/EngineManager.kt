@@ -53,6 +53,14 @@ class EngineManager(private val context: Context, private val pickToken: String?
    */
   fun snapshotFresh(): Boolean {
     if (!nodeBin.exists()) return false
+    // 先体检：外来/半成品运行时（如 home/ds/tmp-upgrade 那棵）会让引擎永远起不来，
+    // 这时候**不能**再信"在线更新优先"，必须重解压内嵌快照把它换掉。
+    val problems = runtimeProblems()
+    if (problems.isNotEmpty()) {
+      Log.w(TAG, "runtime problems -> force re-extract: " + problems.joinToString("; "))
+      dropForeignRuntime()
+      return false
+    }
     // 在线更新运行时优先：在线指纹存在即视为最新（不重解压内嵌快照，避免把
     // 在线更新覆盖回出厂）。运行时补丁每次启动都会重打，在线运行时同样受益。
     if (File(context.filesDir, ".online-fingerprint").exists()) return true
@@ -391,6 +399,9 @@ class EngineManager(private val context: Context, private val pickToken: String?
       File(home, "profiles/web/cordis.patch.yml"), "dsh-mobile-pwsh-fix")
     ensureFactoryProfile(home)
     PluginCatalog.migrateDefaults(context)
+    // 快照里 profile 的 @deepseek-ai 链接指向别的 App（Termux）私有目录，链不到就整体
+    // 解析不到核心包（截图第一条报错）。先重指到本 App 引擎树，再谈别的。
+    repairForeignProfileLinks(home)
     seedDesktopMemories()
     seedLeisureBook()
     val plugins = PluginCatalog.list(context)
@@ -666,6 +677,216 @@ class EngineManager(private val context: Context, private val pickToken: String?
   /** 引擎自带 node_modules 里是否有这个名字（含"裸名 → @deepseek-ai/名"映射）。 */
   private fun existsInDsh(dshNm: File, spec: String): Boolean =
     File(dshNm, spec).exists() || File(dshNm, "@deepseek-ai/" + pkgRootOf(spec)).exists()
+
+  /**
+   * 把 profile 里的 `@deepseek-ai` 下的包链接**全部重指到 App 自己的引擎树**。
+   *
+   * 用户手机实况（2026-09-13 截图，两条报错都是这一件事引起的）：
+   *   failed to import loader entry subprocess (@deepseek-ai/dsh-subprocess-local):
+   *     Cannot find package '@deepseek-ai/dsh-subprocess-local' imported from .../profiles/web/
+   *   failed to import loader entry sandbox (@deepseek-ai/dsh-sandbox-local):
+   *     Cannot find the native Koffi module
+   * 而堆栈里的 loader 来自 .../files/home/ds/tmp-upgrade/package/node_modules/...
+   * —— profile 的链接指向了**外来/半成品的 dsh 树**（Termux 里那套、或某次升级残留），
+   * 于是核心包解析不到、koffi 也拿不到 android_arm64 的原生库。
+   *
+   * 本机复现：把 profile 的 @deepseek-ai 链接打掉后引擎立刻报同类错；
+   * 重指到引擎树（usr/.../dsh/node_modules/@deepseek-ai 下，快照内 196 个包齐全，
+   * 含 dsh-subprocess-local / dsh-sandbox-local / koffi android_arm64）后正常起、curl 200。
+   *
+   * 判定：链接是符号链接**且**其指向不在本 App 的 usr/ 里 → 一律重指。
+   * @return 重指成功的条数。
+   */
+  private fun repairForeignProfileLinks(home: File): Int {
+    var fixed = 0
+    val engineNm = File(usrDir, "lib/node_modules/@deepseek-ai/dsh/node_modules")
+    val usrPrefix = usrDir.absolutePath + "/"
+    for (base in listOf(File(home, "profiles/node_modules"), File(home, "profiles/web/node_modules"))) {
+      val scope = File(base, "@deepseek-ai")
+      if (!scope.isDirectory) continue
+      val kids = scope.listFiles() ?: continue
+      for (link in kids) {
+        val path = link.toPath()
+        if (!Files.isSymbolicLink(path)) continue
+        val target = try {
+          Files.readSymbolicLink(path).toString()
+        } catch (_: Exception) {
+          null
+        } ?: continue
+        // 指向本 App 引擎树 → 不动
+        if (target.startsWith(usrPrefix)) continue
+        val real = File(engineNm, "@deepseek-ai/" + link.name)
+        if (!real.exists()) continue
+        try {
+          Files.delete(path)
+        } catch (_: Exception) {
+          continue
+        }
+        try {
+          Files.createSymbolicLink(path, real.toPath())
+          fixed++
+        } catch (_: Throwable) {
+          try {
+            real.copyRecursively(link, overwrite = false)
+            fixed++
+          } catch (_: Exception) {
+          }
+        }
+      }
+    }
+    if (fixed > 0) Log.w(TAG, "repointed foreign profile links -> own runtime: $fixed")
+    return fixed
+  }
+
+  /** 找出"劫持解析"的外来 node_modules 根（引擎会从这里加载到别处的 dsh 树）。 */
+  private fun foreignResolutionRoots(home: File): List<String> {
+    val out = mutableListOf<String>()
+    val usrPrefix = usrDir.absolutePath + "/"
+    val roots = listOf(
+      File(home, "node_modules"),
+      File(File(home, ".dsh"), "node_modules"),
+      File(File(home, ".dsh/profiles"), "node_modules"),
+      File(File(home, ".dsh/profiles/web"), "node_modules"),
+    )
+    for (root in roots) {
+      if (!root.exists()) continue
+      // 常见形态：node_modules 或它下面的 @deepseek-ai 是链接，且指向本 App 运行时之外
+      val targets = mutableListOf<Pair<String, String>>()
+      if (Files.isSymbolicLink(root.toPath())) {
+        val t = try {
+          Files.readSymbolicLink(root.toPath()).toString()
+        } catch (_: Exception) {
+          ""
+        }
+        targets += root.absolutePath to t
+      }
+      val scope = File(root, "@deepseek-ai")
+      if (scope.isDirectory) {
+        for (k in scope.listFiles() ?: emptyArray()) {
+          if (!Files.isSymbolicLink(k.toPath())) continue
+          val t = try {
+            Files.readSymbolicLink(k.toPath()).toString()
+          } catch (_: Exception) {
+            ""
+          }
+          if (t.isNotEmpty() && !t.startsWith(usrPrefix)) {
+            targets += k.absolutePath to t
+          }
+        }
+      }
+      for ((p, t) in targets) {
+        if (t.isEmpty() || !t.startsWith(usrPrefix)) out += p + " -> " + t
+      }
+      // 目录存在但里面没有本 App 的 dsh（说明是外来 npm 树）
+      if (!Files.isSymbolicLink(root.toPath()) && out.none { it.startsWith(root.absolutePath) }) {
+        val engineHere = File(File(root, "@deepseek-ai"), "dsh/node_modules/@deepseek-ai/dsh-base")
+        if (scope.isDirectory && !engineHere.exists()) {
+          out += root.absolutePath + "（外部 npm 树，非本 App 运行时）"
+        }
+      }
+    }
+    return out
+  }
+
+  /**
+   * 运行时体检：关键件缺失/被外来树顶掉时，必须丢掉现有 usr/ 用内嵌快照重解压。
+   *
+   * 为什么必须做：`snapshotFresh()` 原先只要 `.online-fingerprint` 存在就直接
+   * 认为运行时没问题 —— 一旦那棵在线运行时是坏的（用户手机上正是如此，引擎在
+   * home/ds/tmp-upgrade/package 那棵残树里跑），App 就被永久卡死，怎么升级 APK
+   * 都不会换运行时。这就是"一直打不开"的根。
+   * @return 问题清单（空 = 健康）。
+   */
+  private fun runtimeProblems(): List<String> {
+    val issues = mutableListOf<String>()
+    val dsh = File(usrDir, "lib/node_modules/@deepseek-ai/dsh")
+    val engine = File(dsh, "node_modules/@deepseek-ai")
+    // 1) 引擎树本身被换成符号链接 → 外来运行时
+    if (Files.isSymbolicLink(dsh.toPath())) {
+      issues += "dsh 目录是符号链接（外来运行时）"
+    } else {
+      val real = try {
+        dsh.canonicalPath
+      } catch (_: Exception) {
+        ""
+      }
+      if (real.isNotEmpty() && !real.startsWith(usrDir.canonicalPath + File.separator)) {
+        issues += "dsh 不在本 App 运行时内"
+      }
+    }
+    // 2) 关键件在不在
+    val must = listOf(
+      File(usrDir, "bin/node"),
+      File(usrDir, "lib/libtermux-exec-ld-preload.so"),
+      File(dsh, "package.json"),
+      File(dsh, "lib/bin.js"),
+      File(engine, "dsh-app-boot/lib/index.js"),
+      File(engine, "cordis-plugin-loader/lib/index.js"),
+      File(engine, "dsh-base/package.json"),
+      File(engine, "dsh-subprocess-local/package.json"),
+      File(engine, "dsh-sandbox-local/package.json"),
+      File(dsh, "node_modules/koffi/build/koffi/android_arm64"),
+    )
+    for (f in must) {
+      if (!f.exists()) issues += f.absolutePath.removePrefix(usrDir.absolutePath + "/")
+    }
+    // 3) 有外来 node_modules 根在劫持解析（手机实况：引擎从 home/ds/tmp-upgrade/package 起）
+    issues.addAll(foreignResolutionRoots(homeDir))
+    return issues
+  }
+
+  /**
+   * 丢掉外来/损坏的运行时残骸（重解压前的清场）。
+   * 只删确定是残骸的东西：usr 或 dsh 若是符号链接、以及 home/ds/tmp-upgrade 这类
+   * 升级残留目录（截图里引擎就是从那里跑起来的）。用户数据（sessions/settings/凭据）
+   * 不在这些路径下，不受影响。
+   */
+  private fun dropForeignRuntime() {
+    try {
+      val dsh = File(usrDir, "lib/node_modules/@deepseek-ai/dsh")
+      if (Files.isSymbolicLink(dsh.toPath())) {
+        Files.deleteIfExists(dsh.toPath())
+        Log.w(TAG, "dropped symlinked dsh runtime")
+      }
+      if (Files.isSymbolicLink(usrDir.toPath())) {
+        Files.deleteIfExists(usrDir.toPath())
+        Log.w(TAG, "dropped symlinked usr")
+      }
+      // 外来 npm 树：整个移开（改名留证，不直接删），避免继续劫持解析
+      val stamp = System.currentTimeMillis().toString()
+      val roots = listOf(
+        File(homeDir, "node_modules"),
+        File(File(homeDir, ".dsh"), "node_modules"),
+      )
+      for (root in roots) {
+        if (root.exists() && !Files.isSymbolicLink(root.toPath())) {
+          val bak = File(root.parentFile, root.name + ".foreign-" + stamp)
+          if (root.renameTo(bak)) {
+            Log.w(TAG, "moved foreign resolution root aside: " + bak.absolutePath)
+          }
+        }
+      }
+      // 升级残留：home/ds/tmp-upgrade*（引擎曾被从这里启动）
+      val home = homeDir
+      for (cand in listOf(
+        File(home, "ds/tmp-upgrade"),
+        File(home, "ds/tmp-upgrade/package"),
+      )) {
+        if (cand.exists() && cand.isDirectory) {
+          var ok = false
+          try {
+            Files.deleteIfExists(cand.toPath())
+            ok = true
+          } catch (_: Exception) {
+          }
+          if (!ok && cand.deleteRecursively()) ok = true
+          if (ok) Log.w(TAG, "dropped stale upgrade dir: " + cand.absolutePath)
+        }
+      }
+    } catch (t: Throwable) {
+      Log.e(TAG, "dropForeignRuntime failed", t)
+    }
+  }
 
   /**
    * 隔离"上次把引擎拖垮的那条 entry"。
