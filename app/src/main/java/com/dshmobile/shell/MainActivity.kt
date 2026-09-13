@@ -139,6 +139,12 @@ class MainActivity : ComponentActivity() {
 
     /** 会话日志导出端点路径（WebView 内双拦截识别用）。 */
     const val SESSION_EXPORT_PATH = "/api/session.export"
+
+    /** 首次启动等待（冷启动 20-45s，慢机 + 插件多留余量）。 */
+    private const val FIRST_BOOT_WAIT_S = 75
+
+    /** 兜底重试等待（此时插件已收敛到 safe / 最小集，boot 更快）。 */
+    private const val RETRY_WAIT_S = 60
   }
 
   // 文件上传（<input type=file> → WebView onShowFileChooser → 系统文件选择器）。
@@ -1167,7 +1173,7 @@ class MainActivity : ComponentActivity() {
   private fun waitForEngineOrFallback(): Boolean {
     if (!engineManager.startEngine()) return false
     runOnUiThread { engineStatus.text = "正在启动引擎…" }
-    if (waitForEngine(90)) return true
+    if (waitForEngine(FIRST_BOOT_WAIT_S)) return true
 
     runOnUiThread { engineStatus.text = "插件拖垮了引擎，正在改用安全模式…" }
     PluginCatalog.enableOnlyBootCritical(this)
@@ -1178,12 +1184,12 @@ class MainActivity : ComponentActivity() {
     return restartEngineAndWait()
   }
 
-  /** 停掉旧进程并重启一次，等 90 秒。 */
+  /** 停掉旧进程并重启一次，等 RETRY_WAIT_S 秒。 */
   private fun restartEngineAndWait(): Boolean {
     try { engineManager.stopEngine() } catch (_: Exception) {}
     EngineManager.lastStartAttemptAt = 0
     if (!engineManager.startEngine()) return false
-    return waitForEngine(90)
+    return waitForEngine(RETRY_WAIT_S)
   }
 
   /**

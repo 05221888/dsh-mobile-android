@@ -369,55 +369,210 @@ class EngineManager(private val context: Context, private val pickToken: String?
     applyAssetPatchAppend("patched/cordis-pwsh-fix.yml",
       File(home, "profiles/web/cordis.patch.yml"), "dsh-mobile-pwsh-fix")
     PluginCatalog.migrateDefaults(context)
-    ensureBareNodeDeps(home)
     seedDesktopMemories()
     seedLeisureBook()
-    for (plugin in PluginCatalog.list(context)) {
+    val plugins = PluginCatalog.list(context)
+    for (plugin in plugins) {
       installMobilePlugin(plugin.assetDir, plugin.name, home, plugin.scoped)
     }
+    // 依赖预检必须在 applyToggles 之前：被判"依赖缺失"的插件要在这里关掉，
+    // applyToggles 才会顺势把它从 cordis.patch.yml 里摘掉。
+    val autoDisabled = ensurePluginDeps(home, plugins)
     PluginCatalog.applyToggles(context, home)
+    writeStartupReport(autoDisabled)
   }
 
   /**
-   * 补齐桌面插件裸 import 的依赖（如 imagegen 的 `import z from "schemastery"`）。
+   * 插件依赖预检 —— 引擎启动前的最后一道闸。
    *
-   * 快照里只有作用域版 @deepseek-ai/schemastery（挂在 dsh 自己的 node_modules 下），
-   * 没有顶层同名包；App 私有域允许 symlink，所以在这里补出
-   *   <profiles[/web]>/node_modules/<裸名> -> usr/lib/node_modules/@deepseek-ai/dsh/node_modules/<候选>
-   * 作为兜底。v0.15.x 事故：imagegen 升到 1.5.1 时随包 node_modules 丢失，
-   * 全靠这里兜底才能解析；symlink 建不出来时退回整目录拷贝。
+   * 把每个**已启用**内置插件 entry（package.json 的 main，默认 lib/index.js）里出现的
+   * 裸 specifier 逐个验证：
+   *   1) 插件自己的 node_modules / profiles[/web] node_modules 里有 → 放行；
+   *   2) 只有 dsh 自带的 node_modules 里有（schemastery / ws 这类顶层包）→ 建 symlink 借用；
+   *   3) 哪里都没有 → 这插件一加载就 ERR_MODULE_NOT_FOUND，而 cordis 是 fail-loud
+   *      （单插件挂掉整棵 cordis 树倒）→ **直接关掉它**：宁可少个功能，也不能进不去聊天。
+   *
+   * v0.15.x 事故复盘：imagegen 1.5.1 的 lib/index.js 第 3 行 `import z from "schemastery"`，
+   * 随包 node_modules 在升级时丢了、快照里也没有裸 schemastery ⇒ 引擎两次启动超时。
+   * @return 被自动关掉的插件名（写进启动报告）。
    */
-  private fun ensureBareNodeDeps(home: File) {
-    val realRoot = File(usrDir, "lib/node_modules/@deepseek-ai/dsh/node_modules")
-    // 裸名 -> 快照内候选（按顺序取第一个存在的）
-    val aliases = linkedMapOf(
-      "schemastery" to listOf("schemastery", "@deepseek-ai/schemastery"),
-      "ws" to listOf("ws"),
-    )
-    val bases = listOf(File(home, "profiles/web/node_modules"), File(home, "profiles/node_modules"))
-    for ((bare, candidates) in aliases) {
-      val real = candidates.map { File(realRoot, it) }.firstOrNull { it.exists() }
-      if (real == null) {
-        Log.w(TAG, "bare dep $bare: no source under " + realRoot.absolutePath)
-        continue
-      }
-      for (base in bases) {
-        val link = File(base, bare)
-        if (link.exists()) continue
-        base.mkdirs()
-        try {
-          Files.createSymbolicLink(link.toPath(), real.toPath())
-          Log.i(TAG, "bare dep $bare -> " + real.absolutePath)
-        } catch (t: Throwable) {
-          try {
-            real.copyRecursively(link, overwrite = false)
-            Log.i(TAG, "bare dep $bare copied -> " + link.absolutePath)
-          } catch (e: Exception) {
-            Log.w(TAG, "bare dep $bare alias failed: " + e.message)
+  private fun ensurePluginDeps(home: File, plugins: List<CatalogPlugin>): List<String> {
+    val disabled = mutableListOf<String>()
+    try {
+      val webNm = File(home, "profiles/web/node_modules")
+      val topNm = File(home, "profiles/node_modules")
+      val dshNm = File(usrDir, "lib/node_modules/@deepseek-ai/dsh/node_modules")
+      for (plugin in plugins) {
+        if (!PluginCatalog.isEnabled(context, plugin)) continue
+        val dir = pluginDir(home, plugin)
+        if (!dir.isDirectory) continue
+        val entry = entryFileOf(dir) ?: continue
+        val text = try {
+          if (entry.isFile) entry.readText() else null
+        } catch (_: Exception) {
+          null
+        } ?: continue
+        val missing = mutableListOf<String>()
+        for (spec in bareImports(text)) {
+          if (resolvable(webNm, topNm, dir, spec)) continue
+          val borrowed = borrowBareDep(webNm, topNm, dshNm, spec)
+          if (borrowed || resolvable(webNm, topNm, dir, spec)) continue
+          // 借不到时再宽一点：只要引擎自己的 node_modules 里有同名/同名作用域包，
+          // 就认为"引擎有办法解析"，只记日志不关插件（避免误杀本来能跑的插件）。
+          if (existsInDsh(dshNm, spec)) {
+            Log.w(TAG, "spec " + spec + " 未能在 profile 内解析，但引擎自带该包，放行")
+            continue
+          }
+          missing += spec
+        }
+        if (missing.isNotEmpty()) {
+          Log.e(TAG, "plugin " + plugin.name + " 依赖缺失 [" + missing.joinToString(",") + "]")
+          if (plugin.bootCritical) {
+            // 启动必需插件（安卓控制/删会话）不自动关：关掉会丢核心能力，
+            // 依赖问题留给用户按启动报告处理。
+            Log.w(TAG, "bootCritical 插件不自动关闭: " + plugin.name)
+          } else {
+            PluginCatalog.setEnabled(context, plugin, false)
+            disabled += plugin.name
+            Log.w(TAG, "已自动关闭插件: " + plugin.name)
           }
         }
       }
+    } catch (t: Throwable) {
+      // 预检自身出错绝不能阻断启动。
+      Log.e(TAG, "plugin dep preflight failed", t)
     }
+    return disabled
+  }
+
+  /** 插件在 profiles/web/node_modules 下的安装目录。 */
+  private fun pluginDir(home: File, plugin: CatalogPlugin): File {
+    val nm = File(home, "profiles/web/node_modules")
+    return if (plugin.scoped) {
+      File(File(nm, plugin.name.substringBefore('/')), plugin.name.substringAfter('/'))
+    } else {
+      File(nm, plugin.name)
+    }
+  }
+
+  /** 插件 entry 文件：package.json 的 main（默认 lib/index.js）。 */
+  private fun entryFileOf(dir: File): File? = try {
+    val pkg = File(dir, "package.json")
+    val main = if (pkg.isFile) org.json.JSONObject(pkg.readText()).optString("main") else ""
+    File(dir, main.ifBlank { "lib/index.js" })
+  } catch (_: Exception) {
+    File(dir, "lib/index.js")
+  }
+
+  /** 从 JS/TS 源码里抽裸 specifier（跳过相对路径 / node: / 绝对路径 / #imports）。 */
+  private fun bareImports(text: String): Set<String> {
+    val out = linkedSetOf<String>()
+    val res = listOf(
+      Regex("""from\s*["']([^"']+)["']"""),
+      Regex("""import\s*["']([^"']+)["']"""),
+      Regex("""require\(\s*["']([^"']+)["']"""),
+    )
+    for (re in res) {
+      for (m in re.findAll(text)) {
+        val spec = m.groupValues[1]
+        if (spec.startsWith(".") || spec.startsWith("/") ||
+          spec.startsWith("node:") || spec.startsWith("#")
+        ) continue
+        out += spec
+      }
+    }
+    return out
+  }
+
+  /** specifier 能否在「插件自己 / profiles/web / profiles」三处 node_modules 解析。 */
+  private fun resolvable(webNm: File, topNm: File, pluginDir: File, spec: String): Boolean {
+    val names = listOf(spec, pkgRootOf(spec))
+    for (base in listOf(File(pluginDir, "node_modules"), webNm, topNm)) {
+      for (n in names) if (File(base, n).exists()) return true
+    }
+    return false
+  }
+
+  /** "shiki/core" → "shiki"；"@scope/pkg/sub" → "@scope/pkg"。 */
+  private fun pkgRootOf(spec: String): String {
+    val parts = spec.split('/')
+    return if (spec.startsWith("@")) parts.take(2).joinToString("/") else parts.first()
+  }
+
+  /**
+   * 从 dsh 自带的 node_modules 借一个裸依赖出来（symlink 优先，失败退回拷目录）。
+   * 兼容"作用域改名"：裸 `schemastery` 实际是 @deepseek-ai/schemastery。
+   * 悬空 symlink（快照里的旧链接指向不存在的路径）会被替换成本机可用链接。
+   * @return true 表示 profile 里已经能解析这个名字了。
+   */
+  private fun borrowBareDep(webNm: File, topNm: File, dshNm: File, spec: String): Boolean {
+    val real = File(dshNm, spec).takeIf { it.exists() }
+      ?: File(dshNm, "@deepseek-ai/" + pkgRootOf(spec)).takeIf { it.exists() }
+      ?: return false
+    var ok = false
+    for (nm in listOf(webNm, topNm)) {
+      val link = File(nm, spec)
+      if (link.exists()) {
+        ok = true
+        continue
+      }
+      // 悬空 symlink：占着名字但 exists()==false，必须先删再建。
+      if (Files.isSymbolicLink(link.toPath())) {
+        try {
+          Files.delete(link.toPath())
+        } catch (_: Exception) {
+        }
+      }
+      link.parentFile?.mkdirs()
+      try {
+        Files.createSymbolicLink(link.toPath(), real.toPath())
+        Log.i(TAG, "borrow bare dep " + spec + " -> " + real.absolutePath)
+        ok = true
+      } catch (t: Throwable) {
+        try {
+          real.copyRecursively(link, overwrite = false)
+          Log.i(TAG, "borrow bare dep " + spec + " (copied) -> " + link.absolutePath)
+          ok = true
+        } catch (e: Exception) {
+          Log.w(TAG, "borrow bare dep " + spec + " failed: " + e.message)
+        }
+      }
+    }
+    return ok
+  }
+
+  /** 引擎自带 node_modules 里是否有这个名字（含"裸名 → @deepseek-ai/名"映射）。 */
+  private fun existsInDsh(dshNm: File, spec: String): Boolean =
+    File(dshNm, spec).exists() || File(dshNm, "@deepseek-ai/" + pkgRootOf(spec)).exists()
+
+  /** 启动报告（插件自动关闭 / 引擎日志尾巴），排障时给用户一份可复制的文本。 */
+  private fun writeStartupReport(autoDisabled: List<String>) {
+    try {
+      val sb = StringBuilder()
+      sb.append("dsh-mobile 启动报告  ").append(java.util.Date()).append('\n')
+      sb.append("appVersionCode: ").append(appVersionCode()).append('\n')
+      if (autoDisabled.isEmpty()) {
+        sb.append("插件依赖预检: 全部通过").append('\n')
+      } else {
+        sb.append("插件依赖预检: 以下插件因依赖缺失被自动关闭 → ")
+          .append(autoDisabled.joinToString(", ")).append('\n')
+      }
+      val log = File(context.filesDir, "engine.log")
+      if (log.isFile && log.length() > 0) {
+        val tail = log.readText().takeLast(4096)
+        sb.append("\n--- engine.log 末尾 ---\n").append(tail)
+      }
+      File(context.filesDir, "startup-report.txt").writeText(sb.toString())
+    } catch (_: Exception) {
+    }
+  }
+
+  /** 本 App 的 versionCode（用于插件树随 APK 升级强制重铺）。 */
+  private fun appVersionCode(): Int = try {
+    val pi = context.packageManager.getPackageInfo(context.packageName, 0)
+    if (android.os.Build.VERSION.SDK_INT >= 28) pi.longVersionCode.toInt() else @Suppress("DEPRECATION") pi.versionCode
+  } catch (_: Exception) {
+    0
   }
 
   /** 首次启动把电脑记忆种进手机 HOME/.dsh/memories（已有文件不覆盖）。 */
@@ -535,37 +690,91 @@ class EngineManager(private val context: Context, private val pickToken: String?
   }
 
   /**
-   * 把内置插件铺到 target：包版本一致就跳过；版本变了（或首次）整目录重铺。
+   * 把内置插件铺到 target —— 只在"确认已铺好"时跳过。
    *
-   * v0.15.x 事故：旧逻辑"package.json 存在就 return"，于是手机里 imagegen 一直停在
-   * 1.0.5，新包 1.5.1 的 lib 与 node_modules 永远铺不进去；而 imagegen 又被标成
-   * safe 插件、安全模式关不掉，引擎启动直接超时 = 手机用不了。
+   * 判据（.dsh-bundled.json 标记）：版本 + 资产文件数 + App versionCode 三者全一致才算已铺好。
+   *   - 标记缺失 ⇒ 重铺（老版本铺过的目录都没有标记 ⇒ 升级后必然重铺一次，
+   *     这是 v0.15.2 的漏洞：它只比版本号，而手机上坏掉的 imagegen 恰好也是
+   *     1.5.1（版本相同、node_modules 缺失）⇒ 被跳过 ⇒ 依旧起不来）；
+   *   - App versionCode 变了 ⇒ 重铺（内置插件改动随 APK 生效）。
    * @return true 表示本次真的写了文件。
    */
   private fun syncPluginTree(assetDir: String, target: File, bundledVersion: String?): Boolean {
+    val bundledFiles = assetFileCount("patched/$assetDir")
     val pkg = File(target, "package.json")
     val present = pkg.exists() && pkg.length() > 0
-    val installedVersion = if (present) readPluginVersion(pkg.readText()) else null
-    if (present && (bundledVersion == null || installedVersion == bundledVersion)) return false
+    if (present && markerMatches(target, bundledVersion, bundledFiles)) return false
     if (present) {
-      Log.i(TAG, "plugin $assetDir " + (installedVersion ?: "?") + " -> " + (bundledVersion ?: "?") + ": re-laying out")
+      Log.i(TAG, "plugin $assetDir re-layout (version=" + (bundledVersion ?: "?") +
+        ", files=" + bundledFiles + ", appVc=" + appVersionCode() + ")")
       if (!target.deleteRecursively()) Log.w(TAG, "plugin dir delete failed: " + target.absolutePath)
     }
     target.mkdirs()
     copyAssetTree("patched/$assetDir", target)
+    val copied = countFiles(target) - 1 // 减掉标记文件自身
+    if (copied < bundledFiles) {
+      // 拷贝不完整（磁盘满/中断）：不写标记，下次启动重铺。
+      Log.e(TAG, "plugin $assetDir copy incomplete: " + copied + "/" + bundledFiles)
+      File(target, PLUGIN_MARKER).delete()
+      return true
+    }
+    try {
+      File(target, PLUGIN_MARKER).writeText(
+        org.json.JSONObject().apply {
+          put("version", bundledVersion ?: "")
+          put("files", bundledFiles)
+          put("appVersionCode", appVersionCode())
+        }.toString(),
+      )
+    } catch (e: Exception) {
+      Log.w(TAG, "plugin marker write failed: " + e.message)
+    }
     return true
+  }
+
+  /** 标记文件是否与当前 APK 内的插件资产一致。 */
+  private fun markerMatches(target: File, bundledVersion: String?, bundledFiles: Int): Boolean = try {
+    val o = org.json.JSONObject(File(target, PLUGIN_MARKER).readText())
+    o.optString("version") == (bundledVersion ?: "") &&
+      o.optInt("files") == bundledFiles &&
+      o.optInt("appVersionCode") == appVersionCode()
+  } catch (_: Exception) {
+    false
+  }
+
+  /** 数一棵资产子树里的文件数（assets.list 对文件返回空数组，对目录返回子项）。 */
+  private fun assetFileCount(assetPrefix: String): Int {
+    var n = 0
+    val stack = ArrayDeque<String>()
+    stack.addLast(assetPrefix)
+    while (stack.isNotEmpty()) {
+      val p = stack.removeLast()
+      val children = try {
+        context.assets.list(p)
+      } catch (_: Exception) {
+        null
+      } ?: continue
+      if (children.isEmpty()) {
+        n++
+      } else {
+        for (c in children) stack.addLast(p + "/" + c)
+      }
+    }
+    return n
+  }
+
+  /** 数目录里的文件数（不含目录）。 */
+  private fun countFiles(dir: File): Int = try {
+    dir.walkTopDown().count { it.isFile }
+  } catch (_: Exception) {
+    -1
   }
 
   /** 读 assets/patched/<assetDir>/package.json 的 version（读不到返回 null）。 */
   private fun assetPluginVersion(assetDir: String): String? = try {
-    context.assets.open("patched/$assetDir/package.json").bufferedReader().use { readPluginVersion(it.readText()) }
-  } catch (_: Exception) {
-    null
-  }
-
-  /** 从 package.json 文本里取 version 字段（org.json 随 Android 提供）。 */
-  private fun readPluginVersion(text: String): String? = try {
-    org.json.JSONObject(text).optString("version").ifBlank { null }
+    context.assets.open("patched/$assetDir/package.json").bufferedReader().use {
+      org.json.JSONObject(it.readText()).optString("version").ifBlank { null }
+    }
   } catch (_: Exception) {
     null
   }
@@ -742,6 +951,9 @@ class EngineManager(private val context: Context, private val pickToken: String?
 
   companion object {
     private const val TAG = "dsh-engine"
+
+    /** 插件树完整性标记（写在插件目录里；版本/文件数/App versionCode 三者全中才跳过重铺）。 */
+    private const val PLUGIN_MARKER = ".dsh-bundled.json"
 
     /** Watchdog/retry backoff: no new start within this window of the last
      *  attempt. Cold node boot on the phone takes 20-45s (plugin tree + first
