@@ -84,14 +84,29 @@ class EngineManager(private val context: Context, private val pickToken: String?
         backup.deleteRecursively()
         dsh.copyRecursively(backup)
       }
+      // 清干净再解压：脏树（外来/半成品、文件与目录类型冲突）会让 tar 中途抛错，
+      // 界面表现就是「运行时更新失败，请重试」。清掉后磁盘空间也更宽裕。
+      dropForeignRuntime()
+      wipeRuntime()
       val ok = extractSnapshot(onProgress)
       if (!ok) {
         restoreUserData(backup, dsh)
         Log.e(TAG, "snapshot refresh: extract failed, kept old runtime")
+        writeRefreshFailure("解压内嵌快照失败（extractSnapshot=false），详见 engine.log / logcat")
         return false
       }
       restoreUserData(backup, dsh)
       backup.deleteRecursively()
+      // 刚换上全新运行时：旧的 engine.log 与隔离集合都是"上一棵坏树"的账，
+      // 必须一起清掉 —— 否则 applyQuarantine 会照着旧日志把好插件也永久关掉
+      // （例如旧日志里的 failed loader entry sandbox/subprocess），越修越坏。
+      try {
+        File(context.filesDir, "engine.log").delete()
+        context.getSharedPreferences(QUARANTINE_PREFS, Context.MODE_PRIVATE).edit().clear().apply()
+        earlyCrashCount = 0
+        Log.w(TAG, "runtime refreshed: cleared engine.log + quarantine set")
+      } catch (_: Exception) {
+      }
       fingerprintFile().writeText(bundledFingerprint())
       Log.i(TAG, "snapshot refreshed (fingerprint " + bundledFingerprint().take(12) + ")")
       return true
@@ -679,6 +694,51 @@ class EngineManager(private val context: Context, private val pickToken: String?
     File(dshNm, spec).exists() || File(dshNm, "@deepseek-ai/" + pkgRootOf(spec)).exists()
 
   /**
+   * 彻底清掉旧运行时树（usr/）。符号链接只删链接本身。
+   *
+   * 为什么必须清：旧树可能是外来/半成品（dsh 被换成符号链接、或文件与目录类型冲突）。
+   * 直接往里覆盖解压，tar 走到中途就会因为「父路径是文件」这类冲突抛错 →
+   * 整次解压失败 → 界面就是「运行时更新失败，请重试」。
+   * 用户数据都在 home/.dsh（refreshSnapshot 已先备份），usr/ 是纯运行时，删掉安全。
+   * @return true = 目录已不存在（可以干净解压）。
+   */
+  private fun wipeRuntime(): Boolean {
+    return try {
+      val p = usrDir.toPath()
+      if (Files.isSymbolicLink(p)) {
+        Files.deleteIfExists(p)
+      } else if (usrDir.exists()) {
+        val ok = usrDir.deleteRecursively()
+        if (!ok || usrDir.exists()) {
+          try {
+            ProcessBuilder("/system/bin/rm", "-rf", usrDir.absolutePath)
+              .redirectErrorStream(true).start().waitFor()
+          } catch (_: Throwable) {
+          }
+        }
+      }
+      val clean = !usrDir.exists() && !Files.isSymbolicLink(p)
+      Log.w(TAG, "wipeRuntime: exists=" + usrDir.exists() + " clean=" + clean)
+      clean
+    } catch (t: Throwable) {
+      Log.e(TAG, "wipeRuntime failed", t)
+      false
+    }
+  }
+
+  /** 把运行时刷新失败的原因写进启动报告（界面只有一句话，真正原因要能回传）。 */
+  private fun writeRefreshFailure(reason: String) {
+    try {
+      val free = context.filesDir.usableSpace / 1024 / 1024
+      File(context.filesDir, "startup-report.txt").writeText(
+        "dsh-mobile 运行时更新失败  " + java.util.Date() + "\n" + reason +
+          "\n磁盘可用: " + free + " MB\nusr 存在: " + usrDir.exists() + "\n"
+      )
+    } catch (_: Exception) {
+    }
+  }
+
+  /**
    * 把 profile 里的 `@deepseek-ai` 下的包链接**全部重指到 App 自己的引擎树**。
    *
    * 用户手机实况（2026-09-13 截图，两条报错都是这一件事引起的）：
@@ -738,55 +798,48 @@ class EngineManager(private val context: Context, private val pickToken: String?
     return fixed
   }
 
-  /** 找出"劫持解析"的外来 node_modules 根（引擎会从这里加载到别处的 dsh 树）。 */
+  /**
+   * 找出"劫持解析"的外来 node_modules 根。
+   *
+   * 只看**真会被劫持的两处**：
+   *   - home/node_modules          （快照里没有；出现即外来 npm 树）
+   *   - home/.dsh/node_modules     （同上）
+   * 注意**不能**把 profiles/node_modules 算进来：那里 195 条 @deepseek-ai 链接
+   * 本来就被快照写死指向 Termux 私有目录，是"待重指"的正常状态
+   * （由 repairForeignProfileLinks 处理）。若把它当成运行时损坏，就会每启动一次
+   * 重解压一次，永远起不来。
+   */
   private fun foreignResolutionRoots(home: File): List<String> {
     val out = mutableListOf<String>()
     val usrPrefix = usrDir.absolutePath + "/"
-    val roots = listOf(
+    for (root in listOf(
       File(home, "node_modules"),
       File(File(home, ".dsh"), "node_modules"),
-      File(File(home, ".dsh/profiles"), "node_modules"),
-      File(File(home, ".dsh/profiles/web"), "node_modules"),
-    )
-    for (root in roots) {
-      if (!root.exists()) continue
-      // 常见形态：node_modules 或它下面的 @deepseek-ai 是链接，且指向本 App 运行时之外
-      val targets = mutableListOf<Pair<String, String>>()
+    )) {
+      if (!root.exists() && !Files.isSymbolicLink(root.toPath())) continue
       if (Files.isSymbolicLink(root.toPath())) {
         val t = try {
           Files.readSymbolicLink(root.toPath()).toString()
         } catch (_: Exception) {
           ""
         }
-        targets += root.absolutePath to t
+        if (t.isEmpty() || !t.startsWith(usrPrefix)) {
+          out += root.absolutePath + " -> " + t + "（符号链接到 App 运行时之外）"
+        }
+        continue
       }
+      // 真目录：含 @deepseek-ai 却没有本 App 的 dsh-base → 外部 npm 树
       val scope = File(root, "@deepseek-ai")
       if (scope.isDirectory) {
-        for (k in scope.listFiles() ?: emptyArray()) {
-          if (!Files.isSymbolicLink(k.toPath())) continue
-          val t = try {
-            Files.readSymbolicLink(k.toPath()).toString()
-          } catch (_: Exception) {
-            ""
-          }
-          if (t.isNotEmpty() && !t.startsWith(usrPrefix)) {
-            targets += k.absolutePath to t
-          }
-        }
-      }
-      for ((p, t) in targets) {
-        if (t.isEmpty() || !t.startsWith(usrPrefix)) out += p + " -> " + t
-      }
-      // 目录存在但里面没有本 App 的 dsh（说明是外来 npm 树）
-      if (!Files.isSymbolicLink(root.toPath()) && out.none { it.startsWith(root.absolutePath) }) {
-        val engineHere = File(File(root, "@deepseek-ai"), "dsh/node_modules/@deepseek-ai/dsh-base")
-        if (scope.isDirectory && !engineHere.exists()) {
-          out += root.absolutePath + "（外部 npm 树，非本 App 运行时）"
+        val ownDsh = File(File(scope, "dsh"), "node_modules/@deepseek-ai/dsh-base")
+        if (!ownDsh.exists()) {
+          out += root.absolutePath + "（外部 npm 树，不是本 App 运行时）"
         }
       }
     }
     return out
   }
+
 
   /**
    * 运行时体检：关键件缺失/被外来树顶掉时，必须丢掉现有 usr/ 用内嵌快照重解压。

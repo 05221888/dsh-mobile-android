@@ -20,6 +20,27 @@ import org.apache.commons.compress.compressors.xz.XZCompressorInputStream
  */
 object SnapshotExtractor {
 
+  /** 删掉任意类型的已存在路径（文件/目录/悬空链接都能删干净），供覆盖解压用。 */
+  private fun forceDelete(target: File) {
+    val path = target.toPath()
+    try {
+      if (java.nio.file.Files.isDirectory(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+        // 目录：先递归清空再删（deleteIfExists 对非空目录会抛 DirectoryNotEmptyException
+        // —— 覆盖解压时旧目录还在就会把整次解压搞崩，界面报「运行时更新失败」）
+        target.deleteRecursively()
+      }
+    } catch (_: Throwable) {
+    }
+    try {
+      java.nio.file.Files.deleteIfExists(path)
+    } catch (_: Throwable) {
+      try {
+        target.deleteRecursively()
+      } catch (_: Throwable) {
+      }
+    }
+  }
+
   /**
    * Extract an xz-compressed tar stream.
    * @param input raw xz stream.
@@ -36,17 +57,22 @@ object SnapshotExtractor {
     while (entry != null) {
       val target = File(dest, entry.name)
       when {
-        entry.isDirectory -> target.mkdirs()
+        entry.isDirectory -> {
+          // 该位置若被文件/链接占着，mkdirs 会静默失败 → 后面写子文件必崩
+          if (target.exists() && !target.isDirectory) forceDelete(target)
+          target.mkdirs()
+        }
         entry.isSymbolicLink -> {
           target.parentFile?.mkdirs()
           // deleteIfExists 不跟随链接：覆盖重解压时旧 symlink 可能是悬空的
           // （File.exists() 跟随链接对 dangling 返回 false，会漏删导致
           // createSymbolicLink 抛 FileAlreadyExistsException——v0.10.7
           // 升级重解压实测）。对普通文件/目录同样安全删除。
-          java.nio.file.Files.deleteIfExists(target.toPath())
+          forceDelete(target)
           java.nio.file.Files.createSymbolicLink(target.toPath(), java.nio.file.Paths.get(entry.linkName))
         }
         else -> {
+          if (target.isDirectory) forceDelete(target)
           target.parentFile?.mkdirs()
           target.outputStream().use { out ->
             val buf = ByteArray(64 * 1024)
