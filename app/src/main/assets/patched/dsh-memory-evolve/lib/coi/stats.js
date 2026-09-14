@@ -1,3 +1,5 @@
+/* dsh-mobile-es83: syntax downleveled for Chromium<85 (logical assignment / private class members) */
+var __es83_1, __es83_0;
 /**
  * COI 用量统计 — 从任务仓库聚合各 COI 的调用次数与耗时。
  */
@@ -16,7 +18,7 @@ export function coiStats(tasks) {
   let total = 0
   for (const task of tasks.tasks) {
     total += 1
-    const bucket = (byAdapter[task.adapterId] ??= { count: 0, totalMs: 0, byStatus: {} })
+    const bucket = ((__es83_0 = byAdapter)[task.adapterId] ?? (__es83_0[task.adapterId] = ({ count: 0, totalMs: 0, byStatus: {} })))
     bucket.count += 1
     bucket.byStatus[task.status] = (bucket.byStatus[task.status] ?? 0) + 1
     if (task.startedAt && task.finishedAt) {
@@ -49,7 +51,7 @@ export function loadAdapterStats(file) {
 export function recordAdapterStats(file, adapterId, ms) {
   try {
     const stats = loadAdapterStats(file)
-    const bucket = (stats[adapterId] ??= { count: 0, totalMs: 0 })
+    const bucket = ((__es83_1 = stats)[adapterId] ?? (__es83_1[adapterId] = ({ count: 0, totalMs: 0 })))
     bucket.count += 1
     bucket.totalMs += Math.max(0, ms)
     mkdirSync(dirname(file), { recursive: true })

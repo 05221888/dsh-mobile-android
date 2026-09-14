@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "packages": {
+    "engine:@deepseek-ai/dsh-api-gateway/lib/client.js": {
+      "sha256_original": "cdcb59a584ac9b612cbb7b44a41bba384fa635118e5e1556b52d6c77ffdc9c9c",
+      "edits": 1,
+      "private": false
+    },
+    "engine:@deepseek-ai/dsh-client-connection/lib/client.js": {
+      "sha256_original": "45fdcf6f5cd772160c49186424cf8e81d528e25f2d10aac8323a90a011b1d3c1",
+      "edits": 1,
+      "private": false
+    },
+    "engine:@deepseek-ai/dsh-client-locale/lib/client.js": {
+      "sha256_original": "43748aa0c4f1f64e686fb2eedb8774266f101295f9cf5f1e89fcc261e8f6fc69",
+      "edits": 8,
+      "private": false
+    },
+    "engine:@deepseek-ai/dsh-client-ui-cordis/lib/client.js": {
+      "sha256_original": "70dfd95eabb1f4ba273e31f1c6987c12c4ff49ca30f95db9390e045af9a2ec87",
+      "edits": 1,
+      "private": false
+    },
+    "engine:@deepseek-ai/dsh-client-ui-layout/lib/client.js": {
+      "sha256_original": "8807ee56f56f8fbf6f6704a3a5e8aa6b45e9bd1a73b34f4d314c64d9e37d26fe",
+      "edits": 2,
+      "private": true
+    },
+    "engine:@deepseek-ai/dsh-client-ui-theme/lib/client.js": {
+      "sha256_original": "240449265bbc8c8fe701c4b8722cdab0413ff688a3cd6d3dd4169ccde8f319c3",
+      "edits": 8,
+      "private": false
+    },
+    "engine:@deepseek-ai/dsh-client-ui-trajectory/lib/client.js": {
+      "sha256_original": "f46b2348353087b1e9a0ae29811d879f304ca4770e9ffeb5deb1f44e5a65d86a",
+      "edits": 2,
+      "private": false
+    },
+    "engine:@deepseek-ai/dsh-cordis-client-runner/lib/client.js": {
+      "sha256_original": "62a2a1df1eeb7d1f71f33d8bd4cc1e50e81a16a40b64d5cd6f794c55cc057c40",
+      "edits": 4,
+      "private": false
+    },
+    "webprofile:@dsh-android/dsh-client-ui-responsive/lib/client.js": {
+      "sha256_original": "b4b330ee69c2e2d653c52ff53610861691e3321644a17bb9fe5ea0200c43cd76",
+      "edits": 2,
+      "private": true
+    }
+  }
+}

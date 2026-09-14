@@ -1,3 +1,5 @@
+/* dsh-mobile-es83: syntax downleveled for Chromium<85 (logical assignment / private class members) */
+var __es83_0;
 /**
  * dsh-memory-evolve — 模型配置模块（Model Config）。
  *
@@ -131,7 +133,7 @@ export class ModelConfigStore {
       }
       if (Object.keys(next.reasoning).length === 0) delete next.reasoning
     }
-    providers[provider] ??= {}
+    (__es83_0 = providers)[provider] ?? (__es83_0[provider] = ({}))
     if (Object.keys(next).length === 0) {
       delete providers[provider][model]
     } else {

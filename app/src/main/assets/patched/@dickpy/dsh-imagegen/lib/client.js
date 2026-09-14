@@ -1,3 +1,4 @@
+/* dsh-mobile-es83: syntax downleveled for Chromium<85 (logical assignment / private class members) */
 window.__ModuleLoader__.load({
 	id: "@dickpy/dsh-imagegen",
 	factory: (require) => {
@@ -6127,12 +6128,12 @@ window.__ModuleLoader__.load({
 					historyHost = void 0;
 					originalButton = void 0;
 				}
-				root ??= sidebarRoot();
+				root ?? (root = (sidebarRoot()));
 				if (root === void 0) return;
 				root.dataset.dshImagegenSidebarRoot = "";
 				const button = newSessionButton(root);
 				if (button === void 0) return;
-				originalButton ??= button;
+				originalButton ?? (originalButton = (button));
 				tabs = placeTabs(root, controller, newSessionLabel, newSessionTooltip, imageLabel, imageTooltip);
 				historyHost = placeHistoryHost(root);
 				syncActive();

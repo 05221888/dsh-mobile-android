@@ -1,3 +1,5 @@
+/* dsh-mobile-es83: syntax downleveled for Chromium<85 (logical assignment / private class members) */
+var __es83_0;
 /**
  * lib/sync/merge.js — 三路合并器（施工图 §7 第 4 步，纯函数零依赖）
  *
@@ -76,7 +78,7 @@ export function mergeEntries(baseFiles, oursFiles, theirsFiles) {
   const stats = { added: 0, modified: 0, removed: 0, conflicts: 0 } // 决策统计
 
   const push = (location, text) => {
-    ;(out[location] ??= []).push(text)
+    ;((__es83_0 = out)[location] ?? (__es83_0[location] = ([]))).push(text)
   }
 
   for (const key of keys) {

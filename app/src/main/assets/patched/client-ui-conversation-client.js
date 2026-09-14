@@ -1,3 +1,5 @@
+/* dsh-mobile-es83: syntax downleveled for Chromium<85 (logical assignment / private class members) */
+var __es83_4, __es83_3, __es83_2, __es83_1, __es83_0;
 window.__ModuleLoader__.load({
 	id: "@deepseek-ai/dsh-client-ui-conversation",
 	factory: (require) => {
@@ -1691,7 +1693,7 @@ window.__ModuleLoader__.load({
 		//#region ../../../vendor/schemastery/src/index.ts
 		const kSchema = Symbol.for("schemastery");
 		const kValidationError = Symbol.for("ValidationError");
-		globalThis.__schemastery_index__ ??= 0;
+		globalThis.__schemastery_index__ ?? (globalThis.__schemastery_index__ = (0));
 		globalThis.__schemastery_refs__ = void 0;
 		var ValidationError = class extends TypeError {
 			options;
@@ -1732,7 +1734,7 @@ window.__ModuleLoader__.load({
 			} catch {}
 			Object.defineProperty(schema, "uid", { value: globalThis.__schemastery_index__++ });
 			Object.setPrototypeOf(schema, Schema.prototype);
-			schema.meta ||= {};
+			schema.meta || (schema.meta = ({}));
 			schema.toString = schema.toString.bind(schema);
 			return schema;
 		};
@@ -1758,7 +1760,7 @@ window.__ModuleLoader__.load({
 		Schema.ValidationError = ValidationError;
 		Schema.prototype.toJSON = function toJSON() {
 			if (globalThis.__schemastery_refs__) {
-				globalThis.__schemastery_refs__[this.uid] ??= JSON.parse(JSON.stringify({ ...this }));
+				(__es83_0 = globalThis.__schemastery_refs__)[this.uid] ?? (__es83_0[this.uid] = (JSON.parse(JSON.stringify({ ...this }))));
 				return this.uid;
 			}
 			globalThis.__schemastery_refs__ = { [this.uid]: { ...this } };
@@ -1838,7 +1840,7 @@ window.__ModuleLoader__.load({
 		} });
 		Schema.prototype.deprecated = function deprecated() {
 			const schema = Schema(this);
-			schema.meta.badges ||= [];
+			(__es83_1 = schema.meta).badges || (__es83_1.badges = ([]));
 			schema.meta.badges.push({
 				text: "deprecated",
 				type: "danger"
@@ -1847,7 +1849,7 @@ window.__ModuleLoader__.load({
 		};
 		Schema.prototype.experimental = function experimental() {
 			const schema = Schema(this);
-			schema.meta.badges ||= [];
+			(__es83_2 = schema.meta).badges || (__es83_2.badges = ([]));
 			schema.meta.badges.push({
 				text: "experimental",
 				type: "warning"
@@ -2192,7 +2194,7 @@ window.__ModuleLoader__.load({
 				if (isNullable(value)) continue;
 				if (isNullable(result)) result = value;
 				else if (typeof result !== typeof value) throw new ValidationError(`expected ${toString()} but got ${JSON.stringify(data)}`, options);
-				else if (typeof value === "object") merge(result ??= {}, value);
+				else if (typeof value === "object") merge(result ?? (result = ({})), value);
 				else if (result !== value) throw new ValidationError(`expected ${toString()} but got ${JSON.stringify(data)}`, options);
 			}
 			if (!strict && isPlainObject(data)) merge(result, data);
@@ -2231,12 +2233,12 @@ window.__ModuleLoader__.load({
 							break;
 						case "callback": {
 							const callback = schema.callback = args[index];
-							callback["toJSON"] ||= () => callback.toString();
+							(__es83_3 = callback)["toJSON"] || (__es83_3["toJSON"] = (() => callback.toString()));
 							break;
 						}
 						case "constructor": {
 							const constructor = schema.constructor = args[index];
-							if (typeof constructor === "function") constructor["toJSON"] ||= () => constructor["name"];
+							if (typeof constructor === "function") (__es83_4 = constructor)["toJSON"] || (__es83_4["toJSON"] = (() => constructor["name"]));
 							break;
 						}
 						default: schema[key] = args[index];
@@ -7399,12 +7401,12 @@ window.__ModuleLoader__.load({
 			let state;
 			for (const match of context.matches) {
 				if (match.event.type === "assistant/chunk") {
-					state ??= initialState(match.event.data.turn, match.event.data.step);
+					state ?? (state = (initialState(match.event.data.turn, match.event.data.step)));
 					state = updateChunk(state, match);
 					continue;
 				}
 				if (match.event.type === "assistant/message") {
-					state ??= initialState(match.event.data.turn, match.event.data.step);
+					state ?? (state = (initialState(match.event.data.turn, match.event.data.step)));
 					state = {
 						...state,
 						blocks: (0, _deepseek_ai_dsh_client_runtime_client.toAssistantBlocks)(match.event.data.message.content),
@@ -7763,9 +7765,9 @@ window.__ModuleLoader__.load({
 					const contribution = legacyContribution(node);
 					const previous = this.contributions.get(node.key);
 					if (sameContribution(previous, contribution)) continue;
-					finalizedChanged ||= finalizedContributionChanged(previous, contribution);
-					runningChanged ||= runningContributionChanged(previous, contribution);
-					partialChanged ||= partialContributionChanged(previous, contribution);
+					finalizedChanged || (finalizedChanged = (finalizedContributionChanged(previous, contribution)));
+					runningChanged || (runningChanged = (runningContributionChanged(previous, contribution)));
+					partialChanged || (partialChanged = (partialContributionChanged(previous, contribution)));
 					this.contributions.set(node.key, contribution);
 					this.indexContribution(node.key, contribution);
 				}
@@ -7856,7 +7858,7 @@ window.__ModuleLoader__.load({
 				for (const node of input.upserts) {
 					const previous = this.store.get(node.key);
 					const nodeStructural = previous === void 0 || previous.anchorSeq !== node.anchorSeq || previous.visibility !== node.visibility || locationIdentity(previous.location) !== locationIdentity(node.location);
-					structural ||= nodeStructural;
+					structural || (structural = (nodeStructural));
 					if (!nodeStructural) contentOnly.push(node);
 				}
 				this.store.upsert(input.upserts);

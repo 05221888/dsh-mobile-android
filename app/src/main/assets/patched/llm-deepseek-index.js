@@ -1,3 +1,4 @@
+/* dsh-mobile-es83: syntax downleveled for Chromium<85 (logical assignment / private class members) */
 import z from "@deepseek-ai/schemastery";
 import { CONTEXT_WINDOW_EXCEEDED_CODE, CallId, EMPTY_RESPONSE_CODE, LlmAdapter, LlmError, ProviderRequestId, QUOTA_EXCEEDED_CODE, ReasoningEffortId, RetryPolicySchema, assertUsableApiKey, attributionHeaders, contentHasImage, isContextWindowExceededError, isQuotaExceededError, resolveRetryPolicy } from "@deepseek-ai/dsh-llm";
 import { credentialRef } from "@deepseek-ai/dsh-credentials";
@@ -875,7 +876,7 @@ function apply(ctx, config) {
 		throw new LlmError(`llm-deepseek: no API key for provider route "${PROVIDER}"; store ${ref} through the credentials service (the web Models page writes it), or export ${ref} in the launching environment`, "MISSING_CREDENTIAL");
 	};
 	let userId;
-	const resolveUserId = () => userId ??= getOrCreateAnonymousUserId();
+	const resolveUserId = () => userId ?? (userId = (getOrCreateAnonymousUserId()));
 	const adapter = new DeepSeekAdapter({
 		options,
 		resolveApiKey,

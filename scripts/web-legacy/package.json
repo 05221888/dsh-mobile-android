@@ -1,0 +1,18 @@
+{
+  "name": "dsh-mobile-web-legacy",
+  "private": true,
+  "type": "module",
+  "description": "Downlevel dsh front-end bundles to Chromium 83 syntax (Android 10 MIUI stock WebView). See gen_legacy.mjs.",
+  "scripts": {
+    "generate": "node gen_legacy.mjs",
+    "check": "node es83.mjs --check ../../app/src/main/assets/patched ../../app/src/main/assets/patched-web-legacy",
+    "test": "node test_es83.mjs"
+  },
+  "devDependencies": {
+    "@babel/core": "7.26.0",
+    "@babel/parser": "7.26.0",
+    "@babel/plugin-transform-class-properties": "7.25.9",
+    "@babel/plugin-transform-private-methods": "7.25.9",
+    "@babel/plugin-transform-private-property-in-object": "7.25.9"
+  }
+}

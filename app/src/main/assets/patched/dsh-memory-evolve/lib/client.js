@@ -1,3 +1,4 @@
+/* dsh-mobile-es83: syntax downleveled for Chromium<85 (logical assignment / private class members) */
 window.__ModuleLoader__.load({ id: "dsh-memory-evolve", factory: (require) => {
 var module = { exports: {} }; var exports = module.exports;
 "use strict";
@@ -12755,7 +12756,7 @@ var enginePromise;
 var renderSeq = 0;
 var states = /* @__PURE__ */ new WeakMap();
 function loadMermaid() {
-  enginePromise ??= new Promise((resolve, reject) => {
+  enginePromise ?? (enginePromise = (new Promise((resolve, reject) => {
     document.querySelector(`script[${SCRIPT_MARK}]`)?.remove();
     const script = document.createElement("script");
     script.src = ENGINE_SRC;
@@ -12781,7 +12782,7 @@ function loadMermaid() {
     };
     script.onerror = () => fail(`mermaid engine load failed: ${ENGINE_SRC}`);
     document.head.appendChild(script);
-  });
+  })));
   return enginePromise;
 }
 function detectTheme() {

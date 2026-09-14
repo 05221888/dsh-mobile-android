@@ -1,3 +1,5 @@
+/* dsh-mobile-es83: syntax downleveled for Chromium<85 (logical assignment / private class members) */
+var __es83_0;
 import { Fragment, jsx, jsxs } from "react/jsx-runtime";
 import clsx from "clsx";
 import { Fragment as Fragment$1, cloneElement, createElement, memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
@@ -3312,10 +3314,10 @@ function replayLine(line, entrySgr) {
 			}
 			if (char === "	") {
 				const stop = cursor + TAB_WIDTH - cursor % TAB_WIDTH;
-				for (; cursor < stop; cursor++) columns[cursor] ??= {
+				for (; cursor < stop; cursor++) (__es83_0 = columns)[cursor] ?? (__es83_0[cursor] = ({
 					sgr,
 					char: " "
-				};
+				}));
 				continue;
 			}
 			if (ZERO_WIDTH.test(char)) {
@@ -3868,7 +3870,7 @@ function createHighlighter() {
 }
 /** The synchronous highlighter (one instance per document); pre-warmed below, lazy as the fallback. */
 function highlighter() {
-	singleton ??= createHighlighter();
+	singleton ?? (singleton = (createHighlighter()));
 	return singleton;
 }
 /** Grammar ids whose lazy import is in flight or done, so it is requested once. */

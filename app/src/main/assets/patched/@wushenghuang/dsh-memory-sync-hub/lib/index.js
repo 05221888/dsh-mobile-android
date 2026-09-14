@@ -1,3 +1,5 @@
+/* dsh-mobile-es83: syntax downleveled for Chromium<85 (logical assignment / private class members) */
+var __es83_0;
 // dsh-memory-sync (host half): cross-device memory relay over a private
 // Gitee repo. Desktop PC and mobile APK both load this plugin and talk to
 // the same repo; neither needs a git binary — pure fetch.
@@ -62,8 +64,8 @@ function readConfig() {
   if (!cfg?.gitee?.owner || !cfg?.gitee?.repo || !cfg?.gitee?.token) {
     throw new Error(`incomplete config at ${p}: gitee.owner/repo/token are required`);
   }
-  cfg.device ||= os.hostname().toLowerCase();
-  cfg.gitee.branch ||= 'master';
+  cfg.device || (cfg.device = (os.hostname().toLowerCase()));
+  (__es83_0 = cfg.gitee).branch || (__es83_0.branch = ('master'));
   return cfg;
 }
 

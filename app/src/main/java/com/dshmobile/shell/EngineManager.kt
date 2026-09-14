@@ -9,6 +9,7 @@ import java.nio.file.Files
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.compressors.xz.XZCompressorInputStream
+import org.json.JSONObject
 
 /**
  * Owns the embedded Termux environment snapshot: first-launch extraction into
@@ -36,6 +37,16 @@ class EngineManager(private val context: Context, private val pickToken: String?
   private var engineProcess: Process? = null
 
   val engineReady: Boolean get() = nodeBin.exists()
+
+  /** 老 WebView 语法降级补丁的资产前缀（见 applyLegacyWebPatches）。 */
+  private val LEGACY_WEB_PREFIX = "patched-web-legacy/"
+  private val LEGACY_WEB_MANIFEST = "patched-web-legacy/manifest.json"
+
+  /**
+   * 前端资产"已做 Chromium<85 语法降级"的标记（就地改写 assets/patched 下的文件时写入）。
+   * 用作 applyAssetPatch 的附加标记，避免单靠内容标记导致升级后补丁不生效。
+   */
+  private val ES83_MARKER = "dsh-mobile-es83"
 
   /** 内嵌快照指纹（assets/snapshot.sha256，由 build-release.ps1 生成）。 */
   private fun bundledFingerprint(): String = try {
@@ -80,9 +91,14 @@ class EngineManager(private val context: Context, private val pickToken: String?
     val backup = File(context.filesDir, ".dsh-backup")
     val dsh = File(homeDir, ".dsh")
     try {
-      if (dsh.exists()) {
-        backup.deleteRecursively()
-        dsh.copyRecursively(backup)
+      // 只备份用户数据（精确那几项），**不整棵拷 .dsh** —— 见 backupUserData 注释：
+      // 整棵 copyRecursively 会栽在快照那 510 条 Termux 悬空链接上，抛
+      // NoSuchFileException 被下面的 catch 吞掉，界面永远「运行时更新失败，请重试」。
+      if (!backupUserData(dsh, backup)) {
+        // 备份都不完整就绝不动运行时：否则清场后恢复不回来 = 丢用户数据。
+        writeRefreshFailure("用户数据备份失败，已放弃本次刷新（未改动任何运行时文件）")
+        Log.e(TAG, "snapshot refresh aborted: user-data backup failed")
+        return false
       }
       // 清干净再解压：脏树（外来/半成品、文件与目录类型冲突）会让 tar 中途抛错，
       // 界面表现就是「运行时更新失败，请重试」。清掉后磁盘空间也更宽裕。
@@ -117,18 +133,134 @@ class EngineManager(private val context: Context, private val pickToken: String?
     }
   }
 
+  /** 快照会剥离的用户数据（刷新前备份、刷新后恢复的就是这几项）。 */
+  private val userDataNames = listOf(
+    "sessions", "storages", "attachments",
+    ".credentials.yaml", "settings.yaml", ".anonymous-user-id", ".private-layout",
+  )
+
+  /**
+   * 备份用户数据到 backup —— 只精确拷 userDataNames，不整棵拷 .dsh。
+   *
+   * 为什么不能再用 `dsh.copyRecursively(backup)`（v0.15.10 及更早的写法）：
+   *  1) 快照的 profiles 下有 510 条指向 Termux 私有目录的**绝对符号链接**
+   *     （快照是在 Termux 里打的包）。在本 App 里它们全是悬空链接，而 Kotlin 的
+   *     copyRecursively 逐个条目用 File.exists()（会跟随链接）判断，悬空即按
+   *     onError 处理，默认 onError 就是**抛出** → 整次备份中断 → 异常冒到
+   *     refreshSnapshot 的 catch(Throwable) → return false → 界面
+   *     「运行时更新失败，请重试。」。
+   *     v0.15.9 引入「体检不过就强制重解压」之后，这段备份才第一次真正跑起来，
+   *     于是现象从「引擎起不来」变成「运行时更新失败」——崩在**备份**这一步，
+   *     而不是 v0.15.10 以为的**解压**那一步（它改的 forceDelete/清场都在备份之后）。
+   *     本机用 APK 同款 kotlin-stdlib 2.0.21 逐字复刻过该调用链，确认此结论。
+   *  2) 反过来，健康设备上这些链接能解析，copyRecursively 会跟进链接把整棵
+   *     约 248MB 引擎树复制一份 —— 备份又慢又占盘。
+   * 用户数据本来就只有这几项，精确拷即可，两个问题一起消失。
+   *
+   * @return true = 备份完整（源里本来就没有的项不算失败）。
+   */
+  private fun backupUserData(dsh: File, backup: File): Boolean {
+    backup.deleteRecursively()
+    backup.mkdirs()
+    var ok = true
+    for (name in userDataNames) {
+      val src = File(dsh, name)
+      // 用 isSymbolicLink 兜住「链接本身在、目标不在」——File.exists() 此处会漏判。
+      if (!src.exists() && !Files.isSymbolicLink(src.toPath())) continue
+      val dst = File(backup, name)
+      val copied = copyTolerant(src, dst)
+      // 完整性校验：本该存在却没能落到备份里 = 备份不完整，绝不能拿它去清场。
+      if (!copied || (!dst.exists() && !Files.isSymbolicLink(dst.toPath()))) {
+        Log.e(TAG, "backup incomplete: $name")
+        ok = false
+      }
+    }
+    return ok
+  }
+
   /** 恢复快照剥离的用户数据目录/文件（从备份拷贝回私有 .dsh）。 */
   private fun restoreUserData(backup: File, dsh: File) {
     if (!backup.exists()) return
-    for (name in listOf(
-      "sessions", "storages", "attachments",
-      ".credentials.yaml", "settings.yaml", ".anonymous-user-id", ".private-layout",
-    )) {
+    for (name in userDataNames) {
       val src = File(backup, name)
-      if (!src.exists()) continue
+      if (!src.exists() && !Files.isSymbolicLink(src.toPath())) continue
       val dst = File(dsh, name)
-      if (dst.exists()) dst.deleteRecursively()
-      src.copyRecursively(dst)
+      try {
+        deleteEntry(dst)
+        copyTolerant(src, dst)
+      } catch (t: Throwable) {
+        // 恢复失败只记日志、不往上抛：旧写法里异常会从 catch 块里逃出
+        // refreshSnapshot，把一个「尽力恢复」变成整个流程崩溃。
+        Log.e(TAG, "restore user data failed: $name", t)
+      }
+    }
+  }
+
+  /**
+   * 删掉任意类型的已存在条目；**符号链接只删链接本身，绝不跟进目标**。
+   *
+   * 为什么不用 deleteRecursively：它对符号链接会跟随目标（listFiles 走链接），
+   * 把**目标目录里的真实内容**当子项删掉 —— dst 若是指向真实数据目录的链接
+   * （legacy 布局的 sessions/storages 就是这样），那删的就是用户数据。
+   */
+  private fun deleteEntry(f: File) {
+    val p = f.toPath()
+    if (Files.isSymbolicLink(p)) {
+      try {
+        Files.deleteIfExists(p)
+      } catch (_: Exception) {
+      }
+      return
+    }
+    f.deleteRecursively()
+  }
+
+  /**
+   * 容错拷贝（文件 / 目录 / 符号链接），**单个坏条目不会中断整次拷贝**。
+   *
+   * 与 Kotlin copyRecursively 的关键差别：
+   *  - 列目录用 listFiles()（不跟随链接），悬空链接也能被看见、按链接处理；
+   *  - 符号链接一律重建链接本身（照抄 linkName），不跟进目标 —— 既不因悬空抛错，
+   *    也不会把指向运行时的大树整棵拷进来；
+   *  - 条目级 try/catch：一个文件读不动只跳过它并记 ok=false，不连累其它数据。
+   * 用户数据本不该有链接，但真机上确实有（profiles 那批），按链接处理最稳。
+   *
+   * @return true = 全部条目都成功；false = 有条目被跳过（调用方可据此判定备份不完整）。
+   */
+  private fun copyTolerant(src: File, dst: File): Boolean {
+    val sp = src.toPath()
+    if (Files.isSymbolicLink(sp)) {
+      val target = try {
+        Files.readSymbolicLink(sp)
+      } catch (_: Exception) {
+        return false
+      }
+      dst.parentFile?.mkdirs()
+      deleteEntry(dst)
+      return try {
+        Files.createSymbolicLink(dst.toPath(), target)
+        true
+      } catch (_: Throwable) {
+        false // 悬空链接无法实体化，跳过即可
+      }
+    }
+    if (src.isDirectory) {
+      if (dst.exists() && !dst.isDirectory) deleteEntry(dst)
+      if (!dst.mkdirs() && !dst.isDirectory) return false
+      var all = true
+      for (child in src.listFiles() ?: emptyArray()) {
+        if (!copyTolerant(child, File(dst, child.name))) all = false
+      }
+      return all
+    }
+    return try {
+      if (dst.isDirectory) deleteEntry(dst)
+      dst.parentFile?.mkdirs()
+      src.copyTo(dst, overwrite = true)
+      true
+    } catch (t: Throwable) {
+      Log.w(TAG, "copy skipped: " + src.absolutePath + " (" + t.message + ")")
+      false
     }
   }
 
@@ -372,19 +504,27 @@ class EngineManager(private val context: Context, private val pickToken: String?
     val webDist = File(dshPkgs, "dsh-web-frontend/dist")
     val home = File(homeDir, ".dsh")
     applyAssetPatch("patched/client-ui-conversation-client.js",
-      File(dshPkgs, "dsh-client-ui-conversation/lib/client.js"), "onImagePicked")
+      File(dshPkgs, "dsh-client-ui-conversation/lib/client.js"), "onImagePicked", ES83_MARKER)
     applyAssetPatch("patched/settings-general-client.js",
       File(dshPkgs, "dsh-client-ui-settings-general/lib/client.js"), "dsh-mobile-textzoom")
     applyAssetPatch("patched/primitives-index.js",
-      File(dshPkgs, "dsh-client-ui-primitives/lib/index.js"), "dsh-mobile-clip-fallback")
+      File(dshPkgs, "dsh-client-ui-primitives/lib/index.js"), "dsh-mobile-clip-fallback", ES83_MARKER)
     applyAssetPatch("patched/attachment-local-index.js",
       File(dshPkgs, "dsh-attachment-local/lib/index.js"), "COPYFILE_EXCL")
     applyAssetPatch("patched/llm-deepseek-index.js",
-      File(dshPkgs, "dsh-llm-deepseek/lib/index.js"), "describeImage")
+      File(dshPkgs, "dsh-llm-deepseek/lib/index.js"), "describeImage", ES83_MARKER)
     applyAssetPatch("patched/web-frontend-index.html",
       File(webDist, "index.html"), "dsh-mobile-clip-fallback-web")
     applyAssetPatch("patched/dsh-client-modules-index.js",
       File(dshPkgs, "dsh-client-modules/lib/index.js"), "dsh-mobile-bundle-hardening")
+    // node-pty 的 native 绑定在本机加载不了（快照的 Termux libc++ 把 _Unwind_Resume
+    // 藏成 hidden，而 pty.node 是 483 个 ELF 里唯一引用它的）。上游 loadNativeModule
+    // 直接 throw，cordis fail-loud 就把整棵插件树带走 → 引擎永远起不来。
+    // 这里只把那一个失败降级成"用到才报错"，普通子进程（child_process）不受影响。
+    // 注意：node-pty 在 dsh/node_modules/ 下，不在 @deepseek-ai/ 里。
+    applyAssetPatch("patched/node-pty-utils.js",
+      File(usrDir, "lib/node_modules/@deepseek-ai/dsh/node_modules/node-pty/lib/utils.js"),
+      "dsh-mobile-pty-lazy")
     applyAssetPatch("patched/vision-mcp-server.mjs",
       File(homeDir, "vision-mcp/server.mjs"), "Qwen-VL")
     // 每次启动先把 web cordis 重置成出厂工厂件，再按开关写入。
@@ -431,7 +571,9 @@ class EngineManager(private val context: Context, private val pickToken: String?
     val quarantined = applyQuarantine(home)
     // patch 引用但引擎树里没有的插件补成引擎可见（loader 解析基准是引擎树）。
     val linked = linkEngineVisiblePlugins(home)
-    writeStartupReport(autoDisabled, quarantined, linked)
+    // 老 WebView（Chromium<85）语法降级：??= / ||= / &&= 是语法错误，polyfill 无解。
+    val legacyWeb = applyLegacyWebPatches()
+    writeStartupReport(autoDisabled, quarantined, linked, legacyWeb)
   }
 
   /**
@@ -1110,6 +1252,109 @@ class EngineManager(private val context: Context, private val pickToken: String?
     return linked
   }
 
+  /**
+   * 老 WebView（Chromium < 85）语法降级补丁 —— 只处理快照里那份文件。
+   *
+   * 背景：Android 10 的 MIUI 出厂 WebView 是 Chromium 83，而 dsh 前端 bundle 用了
+   * 逻辑赋值 `??=` / `||=` / `&&=`（Chrome 85 才有）。这是**语法**错误，polyfill
+   * 救不了 —— 整份 client.js 无法解析，每条插件都 Uncaught SyntaxError，页面永久
+   * 停在「Loading plugins...」（真机 MIX 2S 实测原报错行号 310/338/212/7807）。
+   *
+   * App 自己下发的前端资产（assets/patched 下）已在构建期就地降级，所以这里只需要
+   * 处理只存在于快照里的那几份：assets/patched-web-legacy/<scope>/<rel> 放降级
+   * 副本，manifest.json 给出原文件的 sha256。
+   *
+   * 为什么用 sha256 而不是无条件覆盖：
+   *  - 幂等：已替换过的文件 sha 不再等于原值 → 下次启动自动跳过；
+   *  - 不误伤：只替换 sha 与出厂值完全一致的文件，用户/其它补丁改过的不动；
+   *  - 面向升级：快照换代后出厂文件变了 → sha 不匹配 → 跳过，等重新生成补丁集。
+   *
+   * scope 对应两个物理根：
+   *  - engine      → usr/lib/node_modules/@deepseek-ai/dsh/node_modules/<rel>
+   *  - webprofile  → home/.dsh/profiles/web/node_modules/<rel>（外加引擎可见副本）
+   * 运行时 API（Object.hasOwn / Array.at / structuredClone …）由
+   * assets/js/compat-polyfills.js 负责，那段已内联进 web-frontend-index.html，
+   * 在 module bundle 之前执行。
+   * @return 本次替换的文件数（写进启动报告）。
+   */
+  private fun applyLegacyWebPatches(): Int {
+    var applied = 0
+    try {
+      val manifest = try {
+        val txt = context.assets.open(LEGACY_WEB_MANIFEST).bufferedReader().use { it.readText() }
+        JSONObject(txt)
+      } catch (t: Throwable) {
+        Log.i(TAG, "legacy web patch manifest absent, skipped")
+        return 0
+      }
+      val packages = manifest.optJSONObject("packages") ?: return 0
+      val engineRoots = listOf(
+        File(usrDir, "lib/node_modules/@deepseek-ai/dsh/node_modules"),
+      )
+      val webProfileRoots = listOf(
+        File(homeDir, ".dsh/profiles/web/node_modules"),
+        File(usrDir, "lib/node_modules/@deepseek-ai/dsh/node_modules"),
+      )
+      val keys = packages.keys()
+      while (keys.hasNext()) {
+        val key = keys.next()
+        val spec = packages.optJSONObject(key) ?: continue
+        val sep = key.indexOf(':')
+        if (sep <= 0) continue
+        val scope = key.substring(0, sep)
+        val rel = key.substring(sep + 1)
+        val roots = when (scope) {
+          "engine" -> engineRoots
+          "webprofile" -> webProfileRoots
+          else -> continue
+        }
+        val want = spec.optString("sha256_original", "")
+        if (want.isEmpty()) continue
+        val assetPath = LEGACY_WEB_PREFIX + scope + "/" + rel
+        if (!assetExists(assetPath)) continue
+        for (root in roots) {
+          val target = File(root, rel)
+          if (!target.isFile) continue
+          // 只替换与出厂完全一致的原件；改过的（含已降级的）跳过 → 幂等。
+          if (sha256Of(target) != want) continue
+          try {
+            context.assets.open(assetPath).use { input ->
+              target.outputStream().use { out -> input.copyTo(out) }
+            }
+            applied++
+            Log.w(TAG, "legacy web patch applied: $key -> " + target.absolutePath)
+          } catch (t: Throwable) {
+            Log.e(TAG, "legacy web patch failed: $key", t)
+          }
+        }
+      }
+    } catch (t: Throwable) {
+      Log.e(TAG, "applyLegacyWebPatches failed", t)
+    }
+    return applied
+  }
+
+  private fun assetExists(path: String): Boolean = try {
+    context.assets.open(path).use { true }
+  } catch (_: Exception) {
+    false
+  }
+
+  private fun sha256Of(f: File): String = try {
+    val md = java.security.MessageDigest.getInstance("SHA-256")
+    f.inputStream().use { ins ->
+      val buf = ByteArray(1 shl 16)
+      while (true) {
+        val n = ins.read(buf)
+        if (n <= 0) break
+        md.update(buf, 0, n)
+      }
+    }
+    md.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
+  } catch (_: Exception) {
+    ""
+  }
+
   /** 抽出 cordis patch 里所有 name: 值（去引号、去 cordis: 内置件）。 */
   private fun patchPluginNames(yml: String): Set<String> {
     val out = linkedSetOf<String>()
@@ -1129,6 +1374,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
     autoDisabled: List<String>,
     quarantined: List<String> = emptyList(),
     linked: List<String> = emptyList(),
+    legacyWeb: Int = 0,
   ) {
     try {
       val sb = StringBuilder()
@@ -1145,6 +1391,9 @@ class EngineManager(private val context: Context, private val pickToken: String?
       }
       if (linked.isNotEmpty()) {
         sb.append("已补引擎可见链接 → ").append(linked.joinToString(", ")).append("\n")
+      }
+      if (legacyWeb > 0) {
+        sb.append("老 WebView 语法降级补丁 → ").append(legacyWeb).append(" 个文件（Chromium<85 的 ??= 等）\n")
       }
       val log = File(context.filesDir, "engine.log")
       if (log.isFile && log.length() > 0) {
@@ -1390,9 +1639,20 @@ class EngineManager(private val context: Context, private val pickToken: String?
     }
   }
 
-  /** 覆盖式补丁：目标已含标记串则跳过。 */
-  private fun applyAssetPatch(asset: String, target: File, marker: String) {
-    if (target.exists() && target.readText().contains(marker)) return
+  /**
+   * 覆盖式补丁：目标已含【全部】标记串才跳过。
+   *
+   * 多标记的意义：内容标记（如 onImagePicked）说明"这是打过补丁的版本"，
+   * 但它**不随补丁内容变化** —— 升级安装时手机上那份仍然带着旧标记，单标记判断
+   * 会直接跳过，新补丁永远铺不上去（v0.15.11 的老 WebView 语法降级就栽在这：
+   * 降级版不会被写入，Chromium 83 上依旧是 SyntaxError）。所以凡是内容会被改写的
+   * 补丁，都要再带一个"这一版补丁"的标记（如 dsh-mobile-es83）。
+   */
+  private fun applyAssetPatch(asset: String, target: File, vararg markers: String) {
+    if (target.exists()) {
+      val text = target.readText()
+      if (markers.all { text.contains(it) }) return
+    }
     try {
       context.assets.open(asset).use { input ->
         target.parentFile?.mkdirs()
