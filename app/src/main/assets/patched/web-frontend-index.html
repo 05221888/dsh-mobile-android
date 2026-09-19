@@ -8,6 +8,8 @@
 
 
 
+
+
     <!-- dsh-mobile-compat-old-browser: runtime polyfills for Chromium <93 (Object.hasOwn / Array.at /
          structuredClone / replaceAll / WeakRef ...) + the CSS `inset` shim
          (Chromium <87). Inlined here so it runs BEFORE the module bundle.
@@ -323,7 +325,7 @@
     }
   })();
 
-  /* ---- 移动端窄屏布局（手机壳专用）[dsh-mobile-mobile-css] -----------------
+  /* ---- 移动端窄屏布局（手机壳专用）[dsh-mobile-mobile-css] [dsh-mobile-composer] -----------------
    * 设置面板在手机上原来只有 300px 宽（= 侧栏抽屉宽度），中文被挤成一字一行、
    * 按钮文字折行，看起来像乱码。两个原因：
    *   ① 抽屉 `._3HOSdG_mobileDrawer` 带 transform（即使是单位矩阵），会让
@@ -426,6 +428,52 @@
       '    max-width: none !important;',
       '  }',
       '  [class*=trailing] { min-width: 0 !important; gap: 6px !important; }',
+
+      /* ⑨ 输入区（composer）底部控制行：原来塞爆且互相重叠 ——
+       *    权限按钮 105px「Full access」+ 模型按钮 176px 挤在一行，
+       *    实测两者重叠 64px，模型文字被压成 "DeepSee…"。
+       *    按用户建议把权限收成胶囊（点开才显示文字），并让两个子块各占各位。 */
+      // 行：横向不换行，等分空间
+      '  [class*=uV2eYG_row] {',
+      '    display: flex !important; align-items: center !important;',
+      '    gap: 6px !important; flex-wrap: nowrap !important;',
+      '    width: 100% !important; min-width: 0 !important; box-sizing: border-box !important;',
+      '  }',
+      // 左块（附件 + 权限）：按内容宽，不被压扁
+      '  [class*=uV2eYG_tools] {',
+      '    flex: 0 0 auto !important; min-width: 0 !important;',
+      '    gap: 4px !important; overflow: visible !important;',
+      '  }',
+      '  [class*=uV2eYG_tools] > * { flex: 0 0 auto !important; }',
+      // 右块（模型 + 其它 + 发送）：吃掉剩余空间，右对齐
+      '  [class*=uV2eYG_trailing] {',
+      '    flex: 1 1 auto !important; min-width: 0 !important;',
+      '    gap: 6px !important; justify-content: flex-end !important;',
+      '  }',
+      // 权限 → 胶囊：只留图标，文字点开才出现
+      '  [class*=Sh0Q9G_trigger] {',
+      '    min-width: 30px !important; width: 30px !important; height: 30px !important;',
+      '    padding: 0 !important; border-radius: 15px !important;',
+      '  }',
+      '  [class*=Sh0Q9G_triggerLabel] { display: none !important; }',
+      '  [class*=Sh0Q9G_triggerIcon] { margin: 0 auto !important; }',
+      // 模型按钮：可压缩，文字省略号（不硬截断）
+      '  [class*=_7KE1Ra_trigger] {',
+      '    flex: 0 1 auto !important; min-width: 0 !important; max-width: none !important;',
+      '    height: 30px !important; padding: 0 8px !important;',
+      '  }',
+      '  [class*=_7KE1Ra_triggerLabel] {',
+      '    overflow: hidden !important; text-overflow: ellipsis !important;',
+      '    white-space: nowrap !important; min-width: 0 !important;',
+      '  }',
+      '  [class*=_7KE1Ra_triggerEffort] { flex: 0 0 auto !important; }',
+      // 图标按钮统一 28px，别各占各的
+      '  [class*=uV2eYG_add], [class*=JObwrW_trigger] {',
+      '    width: 28px !important; min-width: 28px !important; padding: 0 !important; flex: 0 0 auto !important;',
+      '  }',
+      '  [class*=uV2eYG_primary] { flex: 0 0 auto !important; }',
+      // tooltip / 气泡不许越界
+      '  [class*=_bubble_], [class*=tooltip], [class*=Tooltip] { max-width: calc(100vw - 24px) !important; }',
       '}',
     ].join("\n");
 
@@ -499,6 +547,57 @@
       sync();
       setInterval(sync, 400);
     } catch (e) { /* 忽略 */ }
+
+    /* ---- 键盘避让（软键盘弹出时把输入框顶上去）[dsh-mobile-keyboard] ---------
+     * 为什么由页面发起：本机（MIUI / Android 10）系统层拿不到键盘高度 ——
+     * IME 窗口是独立 overlay，App 窗口 frame 不随键盘变化，
+     * getWindowVisibleDisplayFrame / IME insets / visualViewport 三条路都试过，统统拿不到。
+     * 唯一可靠的信号是「输入框是否聚焦」，而那只有页面知道。
+     *
+     * 所以：页面监听 focusin/focusout（只认 textarea / input），通过桥通知壳收缩
+     * WebView 的布局高度；页面视口随之变矮，position:sticky bottom:0 的 composer 就升上来了。
+     */
+    (function () {
+      if (window.__dshKeyboardWired) return;
+      window.__dshKeyboardWired = true;
+
+      var isTextField = function (el) {
+        if (!el || el.nodeType !== 1) return false;
+        var tag = el.tagName;
+        if (tag === "TEXTAREA") return true;
+        if (tag === "INPUT") {
+          var t = (el.getAttribute("type") || "text").toLowerCase();
+          return ["text", "search", "url", "email", "password", "number", "tel"].indexOf(t) >= 0;
+        }
+        return el.isContentEditable === true;
+      };
+
+      var notify = function (visible) {
+        try {
+          if (window.androidBridge && typeof window.androidBridge.setKeyboardVisible === "function") {
+            window.androidBridge.setKeyboardVisible(visible);
+          }
+        } catch (e) { /* 桥不可用（桌面浏览器）：忽略 */ }
+      };
+
+      var focused = false;
+      document.addEventListener("focusin", function (e) {
+        if (!isTextField(e.target) || focused) return;
+        focused = true;
+        // 等一小会儿，避开「聚焦瞬间页面还在滚动」的竞态
+        setTimeout(function () { notify(true); }, 60);
+      }, true);
+
+      document.addEventListener("focusout", function (e) {
+        if (!isTextField(e.target)) return;
+        // 焦点可能只是移到另一个输入框：下一轮事件循环再确认
+        setTimeout(function () {
+          if (isTextField(document.activeElement)) return;
+          focused = false;
+          notify(false);
+        }, 120);
+      }, true);
+    })();
   })();
 })();
     </script>

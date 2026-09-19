@@ -63,8 +63,10 @@ class MainActivity : ComponentActivity() {
   private lateinit var logSummary: TextView
   /** 崩溃标记：记录未捕获异常摘要，下次启动测试界面提示（不吞异常）。 */
   private var crashInfo: String? = null
-  /** 重启引擎 in-flight 守卫（防连点双杀双启）。 */
+  /** 引擎重启 in-flight 守卫（防连点双杀双启）。 */
   private val engineRestarting = java.util.concurrent.atomic.AtomicBoolean(false)
+  /** v0.15.18：键盘弹出时给 WebView 让出的高度（px），由 onCreate 按屏高算。 */
+  private var keyboardShrinkPx: Int = 0
   /** 前台引擎监控：3s 轮询探测，down→测试界面、up→恢复 WebUI
    *  （"设置里杀进程/引擎崩溃回退测试界面"的落地；watchdog 负责恢复）。 */
   private val engineMonitorHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -323,11 +325,35 @@ class MainActivity : ComponentActivity() {
       LogCollector.log("dsh-shell", "app onCreate (dev log on)")
     }
     // 沉浸式：内容延伸到系统栏区域（状态栏常态收起，边缘滑动临时呼出）。
+    // 注意：这一句不能去掉 —— 它是让 IME insets 正常下发的关键。
+    // 2026-09-20 实测：去掉它之后键盘弹出时 innerHeight 恒为 770（insets 不再重算）；
+    // 保留它 + 下面的 padding 监听，键盘弹出时 innerHeight 会 770 → 470，输入框随之上移。
     WindowCompat.setDecorFitsSystemWindows(window, false)
     applyImmersive(immersivePrefs())
     val root = FrameLayout(this)
     webView = WebView(this).apply { id = View.generateViewId() }
     root.addView(webView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+    // v0.15.18：键盘弹出时把输入区顶上去，否则打字时看不见自己打的内容。
+    //
+    // 真机（MIX 2S / MIUI / Android 10）实测：系统层拿不到键盘高度 ——
+    //   · App 窗口 attrs 是 adjust=resize，但 IME 窗口是独立 overlay（sim={adjust=pan}），
+    //     键盘弹出后 App 窗口 frame 仍是满屏 [0,0][1080,2160]；
+    //   · 于是 getWindowVisibleDisplayFrame 恒等于屏高、IME insets 不回调、
+    //     WebView 侧 innerHeight 恒 770、visualViewport 收不到 resize/scroll。
+    //   （试过：去 setDecorFitsSystemWindows、去 LAYOUT_STABLE/LAYOUT_FULLSCREEN、
+    //     反射取 IME 窗口、轮询 —— 都拿不到。）
+    //
+    // 唯一可靠的信号是**输入框是否聚焦**（页面自己知道）。所以由页面在焦点变化时
+    // 通过桥通知壳，壳把 WebView 高度收缩/还原，键盘区域就空出来了。
+    keyboardShrinkPx = (resources.displayMetrics.heightPixels * 0.42f).toInt()
+    androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
+      val ime = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+      val nav = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
+      val bottom = maxOf(ime, nav)
+      webView.setPadding(0, 0, 0, bottom)
+      insets
+    }
+    androidx.core.view.ViewCompat.requestApplyInsets(root)
     guideView = buildGuideView()
     root.addView(guideView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     val density = resources.displayMetrics.density
@@ -411,6 +437,33 @@ class MainActivity : ComponentActivity() {
     if (hasFocus) applyImmersive(immersivePrefs())
   }
 
+  /**
+   * v0.15.18：键盘避让。页面在输入框聚焦/失焦时经桥调用。
+   *
+   * 为什么不让系统算：本机 MIUI/Android 10 上 IME 是独立 overlay，App 窗口 frame 不随
+   * 键盘变化 —— getWindowVisibleDisplayFrame / IME insets / visualViewport 三条路都拿不到
+   * 键盘高度（真机逐条验证过）。唯一可靠信号是「输入框是否聚焦」，而那只有页面知道。
+   *
+   * 做法：收缩 WebView 的布局高度（不是 padding —— padding 只缩绘制区，页面视口不变），
+   * 页面视口随之变矮，position:sticky bottom:0 的 composer 就跟着升上来了。
+   */
+  private fun applyKeyboardShrink(visible: Boolean) {
+    if (keyboardShrinkPx <= 0) return
+    try {
+      val lp = webView.layoutParams
+      val screenH = resources.displayMetrics.heightPixels
+      val target = if (visible) (screenH - keyboardShrinkPx).coerceAtLeast(screenH / 3)
+      else FrameLayout.LayoutParams.MATCH_PARENT
+      if (lp.height != target) {
+        Log.i("dsh-keyboard", "shrink=" + visible + " -> height=" + target)
+        lp.height = target
+        webView.layoutParams = lp
+      }
+    } catch (t: Throwable) {
+      Log.w("dsh-keyboard", "applyKeyboardShrink failed", t)
+    }
+  }
+
   /** 沉浸式状态栏持久化读取（设置 → 通用设置 开关；默认收起）。 */
   private fun immersivePrefs(): Boolean {
     return try {
@@ -433,6 +486,9 @@ class MainActivity : ComponentActivity() {
           controller.show(WindowInsetsCompat.Type.statusBars())
         }
       } else {
+        // 保持原样（含 LAYOUT_STABLE / LAYOUT_FULLSCREEN）：这是键盘 insets 能正常下发的前提。
+        // 2026-09-20 实测：去掉这两个 flag 后，键盘弹出时 innerHeight 不再变化（770 恒定），
+        // 输入框被压在键盘下 —— 所以不要"优化"掉它们。
         val flags = if (enabled) {
           View.SYSTEM_UI_FLAG_FULLSCREEN or
             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
@@ -635,6 +691,8 @@ class MainActivity : ComponentActivity() {
         onOpenShizukuSetup = { openShizukuSetup() },
         onOpenPluginManager = { startActivity(Intent(this, PluginManagerActivity::class.java)) },
         onCheckAppUpdate = { startActivity(Intent(this, PhoneSettingsActivity::class.java)) },
+        // v0.15.18：页面报告输入框聚焦/失焦 → 收缩/还原 WebView 高度，给键盘让位。
+        onKeyboardVisibility = { visible -> runOnUiThread { applyKeyboardShrink(visible) } },
         onGetDevLogEnabled = { DevLogPrefs.isEnabled(this) },
         onSetDevLogEnabled = { enabled ->
           DevLogPrefs.setEnabled(this, enabled)

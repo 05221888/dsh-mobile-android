@@ -31,7 +31,21 @@ class AndroidBridge(
   private val onOpenShizukuSetup: () -> Unit = {},
   private val onOpenPluginManager: () -> Unit = {},
   private val onCheckAppUpdate: () -> Unit = {},
+  /**
+   * v0.15.18 键盘避让：页面在输入框聚焦/失焦时通知壳，壳收缩/还原 WebView 高度。
+   * 为什么走这条路：本机（MIUI / Android 10）系统层拿不到键盘高度 —— IME 是独立
+   * overlay，App 窗口 frame 不随键盘变化，insets 不回调，页面也收不到 resize。
+   * 唯一可靠信号就是「输入框是否聚焦」，而那只有页面知道。
+   * @param shrink true = 键盘要弹了（收缩），false = 收起了（还原）
+   */
+  private val onKeyboardVisibility: (shrink: Boolean) -> Unit = {},
 ) {
+
+  /** 页面通知：软键盘将弹出 / 已收起。 */
+  @JavascriptInterface
+  fun setKeyboardVisible(visible: Boolean) {
+    onKeyboardVisibility(visible)
+  }
 
   @JavascriptInterface
   fun version(): String = "1.0"
