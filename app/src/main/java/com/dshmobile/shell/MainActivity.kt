@@ -448,7 +448,11 @@ class MainActivity : ComponentActivity() {
       themeRetryRunnable?.let { webView.removeCallbacks(it) }
       webView.destroy()
     }
-    engineManager.stopEngine()
+    // v0.15.13：不再在 onDestroy 里杀引擎。引擎生命周期的所有者是前台服务
+    // EngineService（通知写着"dsh 引擎运行中"+ 看门狗自愈）。在这里 stopEngine
+    // 会和看门狗打架：划掉界面 → 引擎被杀 → 8s 后被拉起来，中间白等一次 20s 冷启动，
+    // 而且正好制造"旧进程还没退、新进程抢 3080"的 EADDRINUSE 窗口。
+    // 要停引擎：系统设置里强制停止 App，或杀掉进程。
   }
 
   override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {

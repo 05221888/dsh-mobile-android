@@ -7,6 +7,7 @@ import android.app.Service
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
@@ -50,23 +51,38 @@ class EngineService : Service() {
   private fun ensureEngine() {
     if (EngineProbe.check().optBoolean("running", false)) {
       EngineManager.earlyCrashCount = 0
-      return
+    } else if (engineManager.engineReady) {
+      engineManager.startEngine()
     }
-    if (engineManager.engineReady && engineManager.startEngine()) {
-      // Watchdog: poll every 5s; if the engine process dies, restart it.
-      if (watchdog == null) {
-        watchdog = Executors.newSingleThreadScheduledExecutor().also { exec ->
-          exec.scheduleWithFixedDelay({
-            if (!EngineProbe.check().optBoolean("running", false) && engineManager.engineReady) {
-              // 连崩时放慢节奏（早夭已清冷却，避免 5s 狂拉加重崩溃循环）。
-              val delay = if (EngineManager.earlyCrashCount >= 2) 15_000L else 8_000L
-              Thread.sleep(delay)
-              EngineManager.lastStartAttemptAt = 0
-              engineManager.startEngine()
-            }
-          }, 8, 8, TimeUnit.SECONDS)
+    // v0.15.13：看门狗与"这次是不是我启的引擎"解耦。
+    // 旧逻辑是「引擎已在跑就 return」→ 正常启动路径（Activity 先把引擎拉起来，
+    // 再 startForegroundService）永远装不上看门狗：后台引擎死了没人拉，
+    // 通知却还写着"dsh 引擎运行中"。现在只要运行时在位就装上。
+    armWatchdog()
+  }
+
+  /**
+   * Watchdog: poll every 8s; if the engine is not answering, restart it.
+   * 进程还在（正常启动窗口）时不清冷却——交给 startEngine 的 60s 宽限期判断，
+   * 否则就是拿 5s/8s 的轮询去逼一次"杀重启"，真机 EADDRINUSE 的来源之一。
+   */
+  private fun armWatchdog() {
+    if (!engineManager.engineReady || watchdog != null) return
+    watchdog = Executors.newSingleThreadScheduledExecutor().also { exec ->
+      exec.scheduleWithFixedDelay({
+        try {
+          if (engineManager.engineReady && !EngineProbe.check().optBoolean("running", false)) {
+            val exited = engineManager.engineExited
+            if (exited) EngineManager.lastStartAttemptAt = 0
+            // 连崩时放慢节奏（早夭已清冷却，避免狂拉加重崩溃循环）。
+            if (EngineManager.earlyCrashCount >= 2) Thread.sleep(7_000)
+            Log.i(TAG, "watchdog: engine down (exited=" + exited + "), restarting")
+            engineManager.startEngine()
+          }
+        } catch (t: Throwable) {
+          Log.w(TAG, "watchdog tick failed", t)
         }
-      }
+      }, 8, 8, TimeUnit.SECONDS)
     }
   }
 
@@ -89,6 +105,7 @@ class EngineService : Service() {
   }
 
   companion object {
+    private const val TAG = "dsh-engine-svc"
     private const val NOTIFICATION_ID = 2
   }
 }
