@@ -7,6 +7,7 @@
 
 
 
+
     <!-- dsh-mobile-compat-old-browser: runtime polyfills for Chromium <93 (Object.hasOwn / Array.at /
          structuredClone / replaceAll / WeakRef ...) + the CSS `inset` shim
          (Chromium <87). Inlined here so it runs BEFORE the module bundle.
@@ -374,15 +375,40 @@
       '  }',
       // ④ 内容区可滚动、文字不折行、输入框不被系统放大
       '  .VOzbGW_content {',
-      '    width: 100% !important; min-width: 0 !important; min-height: 0 !important;',
-      '    flex: 1 1 auto !important; overflow-y: auto !important;',
+      '    width: 100% !important; max-width: 100% !important; min-width: 0 !important; min-height: 0 !important;',
+      '    flex: 1 1 auto !important; box-sizing: border-box !important;',
+      '    display: flex !important; flex-direction: column !important; overflow: hidden !important;',
       '  }',
-      '  .VOzbGW_options { min-width: 0 !important; min-height: 0 !important; overflow-y: auto !important; }',
-      '  .VOzbGW_content input, .VOzbGW_content textarea, .VOzbGW_content select {',
-      '    font-size: 16px !important; max-width: 100% !important; box-sizing: border-box !important;',
+      // header 单独一行（返回键在左、「打开配置文件」在右），排在 options 上面
+      '  .VOzbGW_header {',
+      '    display: flex !important; align-items: center !important; gap: 10px !important;',
+      '    padding: 8px 12px !important; flex: 0 0 auto !important; order: -1 !important;',
+      '    width: 100% !important; max-width: 100% !important; box-sizing: border-box !important;',
+      '    min-height: 56px !important;',
       '  }',
-      '  .VOzbGW_content button { white-space: nowrap; }',
-      // ⑤ 「Agent 预设」卡片描述：原来是 -webkit-box + nowrap，文字撑到 603px 被裁成半截
+      '  .VOzbGW_actions { margin-left: auto !important; flex: 0 0 auto !important; }',
+      // content-box 会把 padding 加到 width 上（393 → 441），必须 border-box
+      '  .VOzbGW_options {',
+      '    flex: 1 1 auto !important; min-height: 0 !important;',
+      '    width: 100% !important; max-width: 100% !important; box-sizing: border-box !important;',
+      '    overflow-y: auto !important; overflow-x: hidden !important;',
+      '  }',
+      '  .VOzbGW_options * { max-width: 100% !important; box-sizing: border-box !important; }',
+      '  .VOzbGW_options input, .VOzbGW_options textarea, .VOzbGW_options select { font-size: 16px !important; }',
+      '  .VOzbGW_options button { white-space: nowrap; }',
+      // ⑤ 「返回」键：原来只有右上角 28×28 的小 ✕，还和「打开配置文件」挤一行，等于没有退出键。
+      //    改成左侧 44px 高的胶囊；文字由下面的 JS 注入（CSS 伪元素在老 WebView 上不稳）。
+      '  .VOzbGW_close {',
+      '    order: -1 !important; flex: 0 0 auto !important;',
+      '    display: inline-flex !important; align-items: center !important; justify-content: center !important;',
+      '    min-width: 88px !important; height: 44px !important; padding: 0 14px !important;',
+      '    border-radius: 12px !important; border: none !important; cursor: pointer !important;',
+      '    background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.16)) !important;',
+      '    color: inherit !important; font-size: 16px !important; font-weight: 500 !important;',
+      '  }',
+      '  .VOzbGW_close[data-dsh-back="1"] svg { display: none !important; }',
+      '  .VOzbGW_close[data-dsh-back="1"] > .VOzbGW_hiddenLabel { display: none !important; }',
+      // ⑥ 「Agent 预设」卡片描述：原来是 -webkit-box + nowrap，文字撑到 603px 被裁成半截
       '  [class*=cardDesc] {',
       '    display: block !important;',
       '    white-space: normal !important;',
@@ -390,12 +416,11 @@
       '    overflow-wrap: anywhere !important; word-break: break-word !important;',
       '    -webkit-line-clamp: unset !important;',
       '  }',
-      // ⑥ 卡片/分组不许横向撑破容器
+      // ⑦ 卡片/分组不许横向撑破容器
       '  [class*=cards], [class*=cardMain], [class*=card], [class*=group], [class*=section] {',
       '    max-width: 100% !important; min-width: 0 !important;',
       '  }',
-      '  .VOzbGW_options, .VOzbGW_content { max-width: 100% !important; overflow-x: hidden !important; }',
-      // ⑦ 底部输入区的模型选择器：按钮被压到 118px 而文字需要 128px，
+      // ⑧ 底部输入区的模型选择器：按钮被压到 118px 而文字需要 128px，
       //    显示成 "DeepSee…"（就是用户看到的"乱码"之一）。放开宽度上限。
       '  [class*=_7KE1Ra_trigger], [class*=_7KE1Ra_triggerLabel], [class*=_7KE1Ra_root] {',
       '    max-width: none !important;',
@@ -418,6 +443,62 @@
     if (document.readyState === "loading") {
       document.addEventListener("DOMContentLoaded", inject, { once: true });
     }
+
+    /* ---- 设置面板的「返回」语义 -------------------------------------------
+     * 两件事：
+     *   1) 把右上角那个 28×28 的 ✕ 换成看得见的「‹ 返回」（真实 DOM 文本，
+     *      不用 CSS 伪元素 —— 老 WebView 上 content: 里的转义字符不稳）。
+     *   2) 面板打开时压一条 history，这样**系统返回键 / 左滑手势 = 关面板**，
+     *      而不是把整个 App 退掉。dsh 的 SPA 从不 pushState，所以
+     *      MainActivity.onBackPressed 里 webView.canGoBack() 永远是 false，
+     *      返回手势就穿透到 Activity 直接 finish 了。
+     *      关面板时再把那条 history back 掉，历史不会越堆越多。
+     */
+    var settingsOpen = function () {
+      var ov = document.querySelector("[class*=VOzbGW_overlay]");
+      if (!ov) return false;
+      var cs = window.getComputedStyle(ov);
+      return cs.display !== "none" && cs.visibility !== "hidden" &&
+        ov.getBoundingClientRect().height > 10;
+    };
+
+    function patchBackButton() {
+      var btn = document.querySelector('[class*=VOzbGW_close]');
+      if (!btn || btn.getAttribute("data-dsh-back") === "1") return;
+      btn.setAttribute("data-dsh-back", "1");
+      var label = document.createElement("span");
+      label.setAttribute("data-dsh-back-label", "1");
+      label.textContent = "\u2039 返回";
+      label.style.cssText = "font-size:16px;font-weight:500;line-height:1;white-space:nowrap;";
+      btn.appendChild(label);
+    }
+
+    var pushed = false;
+    function sync() {
+      patchBackButton();
+      var open = settingsOpen();
+      if (open && !pushed) {
+        try { history.pushState({ dshSettings: 1 }, ""); pushed = true; } catch (e) { /* 无 history：退化 */ }
+      } else if (!open && pushed) {
+        pushed = false;
+        try { history.back(); } catch (e) { /* 忽略 */ }
+      }
+    }
+
+    window.addEventListener("popstate", function () {
+      if (pushed && settingsOpen()) {
+        pushed = false;
+        var btn = document.querySelector("[class*=VOzbGW_close]");
+        if (btn) btn.click();
+      }
+    });
+
+    // 轮询比 MutationObserver 可靠：面板开合不一定触发我们关心的那几种 mutation，
+    // 而且 pushState 与面板渲染之间有竞态。
+    try {
+      sync();
+      setInterval(sync, 400);
+    } catch (e) { /* 忽略 */ }
   })();
 })();
     </script>
