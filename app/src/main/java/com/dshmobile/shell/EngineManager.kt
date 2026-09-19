@@ -34,7 +34,9 @@ class EngineManager(private val context: Context, private val pickToken: String?
     }
   private val nodeBin = File(usrDir, "bin/node")
   private val dshBin = File(usrDir, "lib/node_modules/@deepseek-ai/dsh/lib/bin.js")
-  private var engineProcess: Process? = null
+  // v0.15.12：进程句柄与 spawn 时刻改为 companion 里的进程级单例。
+  // 原来是实例字段：MainActivity 与 EngineService 各持一份，互相 stop 不掉、
+  // engineExited 也各看各的 → 双启动/杀不掉的真机事故来源。
 
   val engineReady: Boolean get() = nodeBin.exists()
 
@@ -1742,13 +1744,23 @@ class EngineManager(private val context: Context, private val pickToken: String?
           earlyCrashCount = 0
           return true
         }
-        // 进程在但探活失败：杀掉重来，不进 90s 假死冷却。
+        // v0.15.12：宽限期内"活着但没 bind"= 正在启动，只等不杀。
+        // 旧逻辑在这里直接 destroy + 重新 spawn，双启动必踩 EADDRINUSE。
+        val age = System.currentTimeMillis() - engineSpawnedAt
+        if (age in 1 until BOOT_GRACE_MS) {
+          logLifecycle("engine booting (ageMs=$age) -> wait, not restart")
+          return true
+        }
+        // 真过了宽限期还是没起来：杀掉重来，不进 90s 假死冷却。
+        logLifecycle("engine silent for " + age + "ms (>" + BOOT_GRACE_MS + ") -> restart")
         existing.destroy()
         engineProcess = null
+        engineSpawnedAt = 0
         EngineManager.lastStartAttemptAt = 0
       } else if (existing != null) {
         // 僵尸 Process 对象：清掉并放开冷却，否则看门狗 90s 内只能空转 return true。
         engineProcess = null
+        engineSpawnedAt = 0
         EngineManager.lastStartAttemptAt = 0
       }
 
@@ -1765,14 +1777,19 @@ class EngineManager(private val context: Context, private val pickToken: String?
         Runtime.getRuntime().exec(arrayOf("/system/bin/pkill", "-f", "bin.js")).waitFor()
       } catch (_: Throwable) {
       }
-      Thread.sleep(400)
+      // v0.15.12：pkill 只是"发了信号"，node 收尾要时间；原来固定 sleep 400ms
+      // 就 spawn，旧进程还占着端口时新进程 bind 失败 → EADDRINUSE 拖垮整棵树。
+      // 改成真等端口释放（最多 8s），等不到也继续（由引擎自己报错，但不再是盲发）。
+      val freed = awaitPortFree(port, 8_000)
+      logLifecycle("pre-spawn port free=" + freed)
 
       val args = arrayOf(
         nodeBin.absolutePath, "--expose-internals", dshBin.absolutePath, "web", "--port", port.toString(),
       )
       val proc = startWithArgs(args, shellEnv())
       engineProcess = proc
-      EngineManager.lastStartAttemptAt = now
+      engineSpawnedAt = System.currentTimeMillis()
+      EngineManager.lastStartAttemptAt = engineSpawnedAt
       LogCollector.log(TAG, "engine spawned pid-ish alive=" + proc.isAlive)
       // 早夭检测：15s 内退出立刻清冷却；连崩 2 次切 ultra-safe cordis。
       Thread {
@@ -1827,6 +1844,44 @@ class EngineManager(private val context: Context, private val pickToken: String?
     }
   }
 
+  /**
+   * 引擎生命周期关键事件：logcat + 开发者日志文件双写。
+   * 只写 LogCollector 的话，开发者开关没开时排查现场什么都看不到
+   * （v0.15.9~0.15.11 就是靠 startup-report 反推的）。
+   */
+  private fun logLifecycle(message: String) {
+    Log.i(TAG, message)
+    LogCollector.log(TAG, message)
+  }
+
+  /**
+   * 端口是否已被占用（原生 socket 探测）。
+   * 不用 EngineProbe：探活要等 HTTP 应答，引擎正在收尾时它会先报"没运行"，
+   * 而端口其实还占着——那正是 EADDRINUSE 的成因。
+   */
+  private fun isPortBusy(port: Int): Boolean = try {
+    java.net.Socket().use { s ->
+      s.connect(java.net.InetSocketAddress("127.0.0.1", port), 300)
+      true
+    }
+  } catch (_: Throwable) {
+    false
+  }
+
+  /** 等端口真正释放（最多 timeoutMs）。返回是否已释放。 */
+  private fun awaitPortFree(port: Int, timeoutMs: Long): Boolean {
+    val deadline = System.currentTimeMillis() + timeoutMs
+    while (System.currentTimeMillis() < deadline) {
+      if (!isPortBusy(port)) return true
+      try {
+        Thread.sleep(250)
+      } catch (_: InterruptedException) {
+        return !isPortBusy(port)
+      }
+    }
+    return !isPortBusy(port)
+  }
+
   /** 引擎进程是否已退出（兜底流程用它避免死等满超时：cordis 崩是秒退）。 */
   val engineExited: Boolean get() = engineProcess?.isAlive != true
 
@@ -1834,6 +1889,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
   fun stopEngine() {
     engineProcess?.destroy()
     engineProcess = null
+    engineSpawnedAt = 0
     LogCollector.log(TAG, "engine stopped (manual)")
     // 手动停止后重置冷却：用户回前台应立即允许重新启动。
     EngineManager.lastStartAttemptAt = 0
@@ -1906,6 +1962,25 @@ class EngineManager(private val context: Context, private val pickToken: String?
 
     /** 进程级启动 CAS：跨 EngineManager 实例可见（双启动竞态防护）。 */
     val STARTING = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * v0.15.12：进程级引擎句柄（跨 EngineManager 实例共享）。
+     * 原来放在实例字段里，MainActivity 的实例与 EngineService 的实例各看各的：
+     * 一个实例 stopEngine() 杀不掉另一个实例启动的进程，engineExited 也会误判。
+     */
+    @Volatile
+    private var engineProcess: Process? = null
+
+    /** 当前引擎进程的 spawn 时刻（epoch ms）；0 = 无托管进程。 */
+    @Volatile
+    private var engineSpawnedAt: Long = 0
+
+    /**
+     * 启动宽限期：冷启动 node + 插件树 + 首次 bind 在本机实测 20-45s。
+     * 这段窗口里"进程活着但端口还没 listen"是**正常**的，任何看门狗/监控
+     * 都不得据此把它杀掉重启（真机 startup-report 抓到过 EADDRINUSE 整栈）。
+     */
+    const val BOOT_GRACE_MS = 60_000L
 
     /** 上次真实启动时刻（epoch ms）；watchdog 冷却窗口基准。 */
     @Volatile
