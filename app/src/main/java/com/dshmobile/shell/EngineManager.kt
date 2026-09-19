@@ -515,8 +515,12 @@ class EngineManager(private val context: Context, private val pickToken: String?
       File(dshPkgs, "dsh-attachment-local/lib/index.js"), "COPYFILE_EXCL")
     applyAssetPatch("patched/llm-deepseek-index.js",
       File(dshPkgs, "dsh-llm-deepseek/lib/index.js"), "describeImage", ES83_MARKER)
+    // 多标记：内容标记（dsh-mobile-clip-fallback-web）不随补丁内容变化，老版本铺过的
+    // index.html 带着它 → 单标记会误判"已打过"而跳过。第二个标记 dsh-mobile-inset-shim
+    // 只存在于 v0.15.15 起的内联 polyfill 里（Chromium 83 的 CSS inset 简写展开），
+    // 所以升级安装时会重铺一次。
     applyAssetPatch("patched/web-frontend-index.html",
-      File(webDist, "index.html"), "dsh-mobile-clip-fallback-web")
+      File(webDist, "index.html"), "dsh-mobile-clip-fallback-web", "dsh-mobile-inset-shim")
     applyAssetPatch("patched/dsh-client-modules-index.js",
       File(dshPkgs, "dsh-client-modules/lib/index.js"), "dsh-mobile-bundle-hardening")
     // node-pty 的 native 绑定在本机加载不了（快照的 Termux libc++ 把 _Unwind_Resume
@@ -1551,11 +1555,16 @@ class EngineManager(private val context: Context, private val pickToken: String?
     }
     target.mkdirs()
     copyAssetTree("patched/$assetDir", target)
-    val copied = countFiles(target) - 1 // 减掉标记文件自身
+    // v0.15.15：这里原来写的是 countFiles(target) - 1（减掉标记文件自身），但拷贝前
+    // 要么是全新目录、要么刚 deleteRecursively 过，标记文件根本不存在 → 每次都被算成
+    // 「拷贝不完整 N-1/N」→ 删标记 → 下次启动再全量重铺一遍。真机日志里每个内置插件
+    // 每次启动都刷一条 re-layout + copy incomplete 就是这个。改成只在实际存在标记时减。
+    val markerFile = File(target, PLUGIN_MARKER)
+    val copied = countFiles(target) - (if (markerFile.exists()) 1 else 0)
     if (copied < bundledFiles) {
       // 拷贝不完整（磁盘满/中断）：不写标记，下次启动重铺。
       Log.e(TAG, "plugin $assetDir copy incomplete: " + copied + "/" + bundledFiles)
-      File(target, PLUGIN_MARKER).delete()
+      markerFile.delete()
       return true
     }
     try {

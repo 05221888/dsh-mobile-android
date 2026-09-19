@@ -3,11 +3,14 @@
   <head>
     <meta charset="utf-8" />
 
+
+
     <!-- dsh-mobile-compat-old-browser: runtime polyfills for Chromium <93 (Object.hasOwn / Array.at /
-         structuredClone / replaceAll / WeakRef ...). Inlined here so it runs
-         BEFORE the module bundle. Syntax-level gaps (??= ||= &&=, private
-         class members) cannot be polyfilled and are rewritten at build time
-         into assets/patched/ and assets/patched-web-legacy/. -->
+         structuredClone / replaceAll / WeakRef ...) + the CSS `inset` shim
+         (Chromium <87). Inlined here so it runs BEFORE the module bundle.
+         Syntax-level gaps (??= ||= &&=, private class members) cannot be
+         polyfilled and are rewritten at build time into assets/patched/ and
+         assets/patched-web-legacy/. -->
     <script>
 /* dsh-mobile-compat: runtime polyfills for the dsh front-end.
  *
@@ -205,6 +208,117 @@
   if (typeof Symbol.dispose === "undefined") {
     Symbol.dispose = Symbol.for("Symbol.dispose");
   }
+
+  /* ---- CSS `inset` 简写（Chrome 87）---------------------------------------
+   * [dsh-mobile-inset-shim] —— 这个字面量是 applyAssetPatch 的补丁代次标记：
+   * 老版本铺过的 index.html 不带它，升级后才会被重铺（否则新补丁永远上不去）。
+   * 本机 WebView 是 Chromium 83，解析不了 `inset` 简写（Chrome 87 才有）——整条声明
+   * 被丢掉，于是 dsh 里所有 `position:fixed; inset:0` 的弹层都回落到 static position：
+   *   · 设置面板跑到屏幕外/被裁掉 → 「点开设置划不到底、自定义提供方配不了 API Key」
+   *   · 生图弹窗、输入框覆盖层同理（position:absolute; inset:0）
+   * CSS 属性没法在运行时 polyfill，但可以在样式文本进引擎之前把简写展开成
+   * top/right/bottom/left 四条。只在引擎真的不支持时才装。
+   */
+  (function () {
+    var supportsInset = false;
+    try {
+      supportsInset = !!(window.CSS && CSS.supports && CSS.supports("inset", "0"));
+    } catch (e) { /* 老引擎没有 CSS.supports */ }
+    if (supportsInset) return;
+
+    // 只认属性名本身：`--x-inset:` / `inset-inline-start:` / `box-shadow: inset ...`
+    // 都不能碰（前者是自定义属性，后两者不是简写）。
+    var RE = /(^|[;{\s])inset\s*:\s*([^;{}"']+)/g;
+
+    /** 按顶层空白切分（calc(...) / var(...) 里的空格不算分隔符）。 */
+    function splitTop(value) {
+      var parts = [], depth = 0, cur = "";
+      for (var i = 0; i < value.length; i++) {
+        var ch = value.charAt(i);
+        if (ch === "(") depth++;
+        else if (ch === ")") depth--;
+        if (depth === 0 && (ch === " " || ch === "\t" || ch === "\n" || ch === "\r")) {
+          if (cur) { parts.push(cur); cur = ""; }
+          continue;
+        }
+        cur += ch;
+      }
+      if (cur) parts.push(cur);
+      return parts;
+    }
+
+    /** `inset: a [b [c [d]]]` → top/right/bottom/left（含 !important）。 */
+    function expand(css) {
+      if (!css || css.indexOf("inset") < 0) return css;
+      return css.replace(RE, function (all, lead, raw) {
+        var value = String(raw), important = "";
+        var m = /!\s*important\s*$/i.exec(value);
+        if (m) { important = " !important"; value = value.slice(0, m.index); }
+        var p = splitTop(value.replace(/^\s+|\s+$/g, ""));
+        if (!p.length || p.length > 4) return all;
+        var top, right, bottom, left;
+        if (p.length === 1) { top = right = bottom = left = p[0]; }
+        else if (p.length === 2) { top = bottom = p[0]; right = left = p[1]; }
+        else if (p.length === 3) { top = p[0]; right = left = p[1]; bottom = p[2]; }
+        else { top = p[0]; right = p[1]; bottom = p[2]; left = p[3]; }
+        return lead + "top:" + top + ";right:" + right + ";bottom:" + bottom + ";left:" + left + important;
+      });
+    }
+
+    /** 处理一个 <style>（已处理过同一份文本就跳过，避免观察者自激）。 */
+    function fixStyleEl(el) {
+      if (!el || el.nodeType !== 1) return;
+      if (el.tagName === "STYLE") {
+        var text = el.textContent;
+        if (!text || text.indexOf("inset") < 0) return;
+        if (el.__dshInsetFixed === text) return;
+        var fixed = expand(text);
+        el.__dshInsetFixed = fixed;
+        if (fixed !== text) el.textContent = fixed;
+        return;
+      }
+      if (el.querySelectorAll) {
+        var list = el.querySelectorAll("style");
+        for (var i = 0; i < list.length; i++) fixStyleEl(list[i]);
+      }
+    }
+
+    try {
+      var existing = document.querySelectorAll("style");
+      for (var i = 0; i < existing.length; i++) fixStyleEl(existing[i]);
+    } catch (e) { /* 文档还没就绪 */ }
+
+    try {
+      var observer = new MutationObserver(function (muts) {
+        for (var i = 0; i < muts.length; i++) {
+          var mu = muts[i];
+          if (mu.type === "childList") {
+            for (var j = 0; j < mu.addedNodes.length; j++) fixStyleEl(mu.addedNodes[j]);
+          } else if (mu.type === "characterData" && mu.target.parentNode) {
+            fixStyleEl(mu.target.parentNode);
+          }
+        }
+      });
+      observer.observe(document.documentElement || document, {
+        childList: true, subtree: true, characterData: true,
+      });
+    } catch (e) { /* 没有 MutationObserver：退化成只处理已有样式 */ }
+
+    if (window.CSSStyleSheet && CSSStyleSheet.prototype) {
+      var rawInsert = CSSStyleSheet.prototype.insertRule;
+      if (typeof rawInsert === "function") {
+        def(CSSStyleSheet.prototype, "insertRule", function (rule, index) {
+          return rawInsert.call(this, typeof rule === "string" ? expand(rule) : rule, index);
+        });
+      }
+      var rawReplaceSync = CSSStyleSheet.prototype.replaceSync;
+      if (typeof rawReplaceSync === "function") {
+        def(CSSStyleSheet.prototype, "replaceSync", function (text) {
+          return rawReplaceSync.call(this, typeof text === "string" ? expand(text) : text);
+        });
+      }
+    }
+  })();
 })();
     </script>
 
