@@ -9,26 +9,37 @@
    - `manifest.json` —— 引擎快照相机 URL / sha256 / size（快照换了才改）
    - `apk-manifest.json` —— APK 新版本信息（任何一次 APK 升级都必须更新它）
 
-## ⚠️ 2026-09-19：dsh-mobile-releases 附件配额已满（1 GB）
+## ⚠️ 仓库附件配额只有 1 GB：旧版本不要全留（2026-09-19 已踩）
 
-`apk-v0.15.14` 上传时 Gitee 直接拒绝：
+`apk-v0.15.14` 第一次上传时 Gitee 直接拒绝：
 
 ```
 {"message":"验证失败，文件大小已超出仓库附件上限：1 GB"}
 ```
 
-该仓库已塞满 12 个 82MB 的 DSH-Mobile APK（0.15.0~0.15.11），**发新版前必须先腾空间**，
+原因：该仓库塞了 12 个 82MB 的 DSH-Mobile APK（0.15.0~0.15.11）≈ 984MB，配额满了。
+**已按用户决定处理：删掉 `apk-v0.15.0` ~ `apk-v0.15.10`（11 个），只留 `apk-v0.15.11` 一个回退版本**
+（0.15.10 及更早都带已知缺陷，回退没意义），删前已把全部 release 说明存档到
+`scripts/release-notes-archive-gitee.md`。
+
+**以后的规矩：每个 DSH-Mobile 版本约 82MB，1GB 配额只够 10 个左右 → 每次发新版顺手删掉最老的 1~2 个，
+永远保持「最新版 + 最近 1 个回退版」的规模**（约 5 个版本 = 410MB，留足余量）。
+
 三条路（按推荐顺序）：
 
-1. **换仓库发**（本次 v0.15.14 用的就是这条，不删任何旧东西）：
+1. **删旧 release 腾地方**（首选；`scripts/gitee_releases_tool.py delete <owner/repo> <tag>`）：
+   ```powershell
+   python scripts/gitee_releases_tool.py list wushenghuang/dsh-mobile-releases apk-v0.15.
+   python scripts/gitee_releases_tool.py delete wushenghuang/dsh-mobile-releases apk-v0.15.12
+   ```
+   注意：Gitee API **不返回附件的 attach_file_id**，只能整个 release 删（附件一起删）；
+   删之前先 `archive` 存档说明，删之后 tag 也没了。
+2. **换仓库发**（不删任何东西，应急用）：
    ```powershell
    python scripts/gitee_release_any.py wushenghuang/dsh-mobile-android apk-v0.15.14 <apk> <notes.md>
    ```
-   然后把 `apk-manifest.json` 的 `url` 指向新仓库的下载地址即可——App 的更新器只看
-   manifest 里的 url，跨仓库照样能下载。
-2. 删旧版本 release（`DELETE /repos/{owner}/{repo}/releases/{id}`，会连附件一起删）腾出 82MB/个。
-   注意：Gitee API **不返回附件的 attach_file_id**，所以只能整个 release 删，删之前把 notes 留档。
-3. 附件压成 `.apk.xz`（对已内嵌 xz 快照的 APK 收益很小，约 82MB → 78MB，基本不解决问题）。
+   然后把 `apk-manifest.json` 的 `url` 指向新仓库地址——App 更新器只看 url，跨仓库照样能下载。
+3. 附件压成 `.apk.xz`：对已内嵌 xz 快照的 APK 收益很小（约 82MB → 78MB），基本不解决问题。
 
 ## 现在用什么发
 
