@@ -516,11 +516,13 @@ class EngineManager(private val context: Context, private val pickToken: String?
     applyAssetPatch("patched/llm-deepseek-index.js",
       File(dshPkgs, "dsh-llm-deepseek/lib/index.js"), "describeImage", ES83_MARKER)
     // 多标记：内容标记（dsh-mobile-clip-fallback-web）不随补丁内容变化，老版本铺过的
-    // index.html 带着它 → 单标记会误判"已打过"而跳过。第二个标记 dsh-mobile-inset-shim
-    // 只存在于 v0.15.15 起的内联 polyfill 里（Chromium 83 的 CSS inset 简写展开），
-    // 所以升级安装时会重铺一次。
+    // index.html 带着它 → 单标记会误判"已打过"而跳过。第二/第三个标记只存在于
+    // 各自引入的那一版里，所以升级安装时会重铺一次：
+    //   dsh-mobile-inset-shim   ← v0.15.15 Chromium 83 的 CSS inset 展开
+    //   dsh-mobile-mobile-css   ← v0.15.16 移动端窄屏设置面板布局
     applyAssetPatch("patched/web-frontend-index.html",
-      File(webDist, "index.html"), "dsh-mobile-clip-fallback-web", "dsh-mobile-inset-shim")
+      File(webDist, "index.html"),
+      "dsh-mobile-clip-fallback-web", "dsh-mobile-inset-shim", "dsh-mobile-mobile-css")
     applyAssetPatch("patched/dsh-client-modules-index.js",
       File(dshPkgs, "dsh-client-modules/lib/index.js"), "dsh-mobile-bundle-hardening")
     // node-pty 的 native 绑定在本机加载不了（快照的 Termux libc++ 把 _Unwind_Resume

@@ -305,4 +305,102 @@
       }
     }
   })();
+
+  /* ---- 移动端窄屏布局（手机壳专用）[dsh-mobile-mobile-css] -----------------
+   * 设置面板在手机上原来只有 300px 宽（= 侧栏抽屉宽度），中文被挤成一字一行、
+   * 按钮文字折行，看起来像乱码。两个原因：
+   *   ① 抽屉 `._3HOSdG_mobileDrawer` 带 transform（即使是单位矩阵），会让
+   *      position:fixed 的后代以抽屉为参照系 —— 设置面板本身是 fixed inset:0，
+   *      于是被关进抽屉那个 300px 宽的盒子里。改成用 left 位移，fixed 恢复以视口为参照。
+   *   ② dsh 面板 CSS 依赖 `inset: 0`，Chromium 83 解析不了（见上面的 inset shim）；
+   *      这里再显式写四个方向做双保险。
+   * 只在窄屏生效；桌面/宽屏不受影响。
+   *
+   * 为什么放在本文件而不是 dsh-android-control 插件里：该插件的 client 半边
+   * 在当前内核下没有被注册（dsh.client 声明缺 inject 字段），写在那里是死代码。
+   * 本文件由壳在 onPageStarted/onPageFinished 注入，且已内联进首页，必定生效。
+   */
+  (function () {
+    var CSS = [
+      '@media (max-width: 768px) {',
+      // ① 抽屉改用 left 位移（transform 会让 fixed 后代以抽屉为参照系）
+      '  [class*=mobileDrawer] {',
+      '    transform: none !important;',
+      '    left: -100% !important;',
+      '    transition: left var(--ds-transition-duration-slow, .28s) var(--ds-ease-in-out, ease) !important;',
+      '  }',
+      '  [class*=mobileDrawer][data-open] { left: 0 !important; }',
+      // ② 设置面板占满视口（显式四方向，兼容 Chromium 83）
+      '  .VOzbGW_overlay {',
+      '    top: 0 !important; right: 0 !important; bottom: 0 !important; left: 0 !important;',
+      '    padding: 0 !important;',
+      '  }',
+      '  .VOzbGW_panel {',
+      '    width: 100vw !important; max-width: 100vw !important;',
+      '    height: 100% !important; max-height: 100% !important;',
+      '    border-radius: 0 !important;',
+      '    flex-direction: column !important;',
+      '  }',
+      // ③ 导航改成顶部横向滚动条（原来竖排在 300px 里放不下）
+      '  .VOzbGW_nav {',
+      '    width: 100% !important; min-width: 0 !important; flex: 0 0 auto !important;',
+      '    flex-direction: column !important; padding: 10px 12px !important; gap: 10px !important;',
+      '    border-bottom: 1px solid var(--dsw-alias-border-l1);',
+      '  }',
+      '  .VOzbGW_navTitle { display: none !important; }',
+      '  .VOzbGW_navList {',
+      '    flex-direction: row !important; overflow-x: auto !important; gap: 8px !important;',
+      '    width: 100% !important; -webkit-overflow-scrolling: touch;',
+      '  }',
+      '  .VOzbGW_navCell {',
+      '    flex: 0 0 auto !important; width: auto !important; padding: 8px 14px !important;',
+      '    white-space: nowrap !important;',
+      '  }',
+      // ④ 内容区可滚动、文字不折行、输入框不被系统放大
+      '  .VOzbGW_content {',
+      '    width: 100% !important; min-width: 0 !important; min-height: 0 !important;',
+      '    flex: 1 1 auto !important; overflow-y: auto !important;',
+      '  }',
+      '  .VOzbGW_options { min-width: 0 !important; min-height: 0 !important; overflow-y: auto !important; }',
+      '  .VOzbGW_content input, .VOzbGW_content textarea, .VOzbGW_content select {',
+      '    font-size: 16px !important; max-width: 100% !important; box-sizing: border-box !important;',
+      '  }',
+      '  .VOzbGW_content button { white-space: nowrap; }',
+      // ⑤ 「Agent 预设」卡片描述：原来是 -webkit-box + nowrap，文字撑到 603px 被裁成半截
+      '  [class*=cardDesc] {',
+      '    display: block !important;',
+      '    white-space: normal !important;',
+      '    width: auto !important; max-width: 100% !important;',
+      '    overflow-wrap: anywhere !important; word-break: break-word !important;',
+      '    -webkit-line-clamp: unset !important;',
+      '  }',
+      // ⑥ 卡片/分组不许横向撑破容器
+      '  [class*=cards], [class*=cardMain], [class*=card], [class*=group], [class*=section] {',
+      '    max-width: 100% !important; min-width: 0 !important;',
+      '  }',
+      '  .VOzbGW_options, .VOzbGW_content { max-width: 100% !important; overflow-x: hidden !important; }',
+      // ⑦ 底部输入区的模型选择器：按钮被压到 118px 而文字需要 128px，
+      //    显示成 "DeepSee…"（就是用户看到的"乱码"之一）。放开宽度上限。
+      '  [class*=_7KE1Ra_trigger], [class*=_7KE1Ra_triggerLabel], [class*=_7KE1Ra_root] {',
+      '    max-width: none !important;',
+      '  }',
+      '  [class*=trailing] { min-width: 0 !important; gap: 6px !important; }',
+      '}',
+    ].join("\n");
+
+    function inject() {
+      try {
+        if (document.getElementById("dsh-mobile-mobile-css")) return;
+        var style = document.createElement("style");
+        style.id = "dsh-mobile-mobile-css";
+        style.textContent = CSS;
+        (document.head || document.documentElement).appendChild(style);
+      } catch (e) { /* 文档未就绪：等下次注入 */ }
+    }
+    inject();
+    // 首页 <head> 里注入时 head 可能还没建好；再用 DOMContentLoaded 兜一次。
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", inject, { once: true });
+    }
+  })();
 })();
