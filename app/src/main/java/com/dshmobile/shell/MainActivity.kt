@@ -19,6 +19,7 @@ import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.JsResult
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -150,6 +151,24 @@ class MainActivity : ComponentActivity() {
 
     /** 兜底重试等待（此时插件已收敛到 safe / 最小集，boot 更快）。 */
     private const val RETRY_WAIT_S = 60
+
+    /**
+     * v0.15.14：渲染进程崩溃恢复的节流（进程级，跨 Activity 重建保留）。
+     * 崩溃→重建→再崩 不能无限循环；60s 内最多自愈 3 次，之后停在引导页让用户手点。
+     */
+    @Volatile
+    private var rendererRecoveryCount: Int = 0
+    @Volatile
+    private var rendererRecoveryAt: Long = 0
+
+    /** 记一次渲染进程恢复，返回是否还允许自愈。 */
+    fun noteRendererRecovery(): Boolean {
+      val now = System.currentTimeMillis()
+      if (now - rendererRecoveryAt > 60_000L) rendererRecoveryCount = 0
+      rendererRecoveryAt = now
+      rendererRecoveryCount++
+      return rendererRecoveryCount <= 3
+    }
   }
 
   // 文件上传（<input type=file> → WebView onShowFileChooser → 系统文件选择器）。
@@ -517,6 +536,39 @@ class MainActivity : ComponentActivity() {
         super.onPageFinished(view, url)
         if (isEngineSource(url)) injectCompatPolyfills(view)
         pushSystemDark(view)
+      }
+
+      /**
+       * v0.15.14：渲染进程崩溃（低内存老机器上很常见，真机 logcat 抓到过
+       * `Renderer process crash detected (code -1)`）必须自己接住：
+       *  - 不实现 / 返回 false：系统直接杀掉整个 App；
+       *  - 实现但返回 true 却不重建：WebView 变成死视图，页面永久白屏。
+       * 这里返回 true（已处理）+ 销毁死 WebView + 重建 Activity
+       * （v0.15.13 起 onDestroy 不再杀引擎，所以重建不会打断引擎）。
+       */
+      override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail?): Boolean {
+        val didCrash = detail?.didCrash() ?: true
+        Log.e(TAG, "webview render process gone (didCrash=$didCrash); recovering")
+        LogCollector.log(TAG, "webview renderer gone (didCrash=$didCrash) -> recover")
+        try {
+          view.destroy()
+        } catch (_: Throwable) {
+        }
+        val allowed = noteRendererRecovery()
+        runOnUiThread {
+          if (!allowed) {
+            // 反复崩：别再重建（防死循环），停在引导页让用户手动重试。
+            engineStatus.text = "界面进程反复崩溃，已停止自动恢复。可点「重试启动引擎」。"
+            showGuide()
+          } else {
+            try {
+              recreate()
+            } catch (_: Throwable) {
+              finish()
+            }
+          }
+        }
+        return true
       }
     }
     // WebView 下载：会话日志导出（/api/session.export）与其余引擎源下载
