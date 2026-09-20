@@ -526,13 +526,14 @@ class EngineManager(private val context: Context, private val pickToken: String?
     //   dsh-mobile-keyboard-lift-v3 ← v0.15.19 抬起状态去重（避免 500ms 轮询刷屏）
     //   dsh-mobile-keyboard-lift-v4 ← v0.15.19 双向轮询补漏 + 触摸序列守卫
     //   dsh-mobile-keyboard-lift-v5 ← v0.15.19 首屏自动聚焦不再误抬（要求 hasFocus）
+    //   dsh-mobile-keyboard-lift-v6 ← v0.15.19 用真实键盘顶边精确对位（不再按比例估）
     applyAssetPatch("patched/web-frontend-index.html",
       File(webDist, "index.html"),
       "dsh-mobile-clip-fallback-web", "dsh-mobile-inset-shim",
       "dsh-mobile-mobile-css", "dsh-mobile-composer",
       "dsh-mobile-keyboard-lift", "dsh-mobile-keyboard-lift-v2",
       "dsh-mobile-keyboard-lift-v3", "dsh-mobile-keyboard-lift-v4",
-      "dsh-mobile-keyboard-lift-v5")
+      "dsh-mobile-keyboard-lift-v5", "dsh-mobile-keyboard-lift-v6")
     applyAssetPatch("patched/dsh-client-modules-index.js",
       File(dshPkgs, "dsh-client-modules/lib/index.js"), "dsh-mobile-bundle-hardening")
     // node-pty 的 native 绑定在本机加载不了（快照的 Termux libc++ 把 _Unwind_Resume

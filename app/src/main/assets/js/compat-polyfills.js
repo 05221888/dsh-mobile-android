@@ -529,7 +529,7 @@
       setInterval(sync, 400);
     } catch (e) { /* 忽略 */ }
 
-    /* ---- 键盘避让：把输入区抬到键盘之上 [dsh-mobile-keyboard-lift-v5] --------
+    /* ---- 键盘避让：把输入区抬到键盘之上 [dsh-mobile-keyboard-lift-v6] --------
      * v0.15.19 重写。上一版（v0.15.18）的做法是「页面报焦点 → 壳收缩 WebView 高度」，
      * 真机上直接把输入搞坏了：收缩正好发生在输入框聚焦、IME show 请求还在途中的那一瞬，
      * 改 WebView 布局会让这次 show 请求失效 → **点了输入框键盘不出来**。
@@ -544,9 +544,89 @@
 
       var CSS_ID = "dsh-kb-lift-css";
       var ROOT_CLASS = "dsh-kb-up";
-      // 本机（MIX 2S / 1080x2160）实测键盘约占视口的 35%，取 0.36 让输入框刚好落在键盘上方。
-      var LIFT_RATIO = 0.36;
+      /**
+       * 抬多少：让 composer 卡片的**底边正好落在键盘顶边**上。
+       *
+       * 键盘高度系统不给 App（IME 是独立 overlay：insets 不回调、
+       * getWindowVisibleDisplayFrame 恒满屏、visualViewport 无事件），
+       * 壳也读不到 —— 普通 app 身份执行 `dumpsys window` 直接
+       * `Can't find service: window`（需要 DUMP 权限），所以只能量一次、写死比例。
+       *
+       * 2026-09-20 真机实测（MIX 2S / 1080x2160 / dpr 2.75 / 微信输入法）：
+       *   IME 窗口 `mGivenContentInsets=[0,1292][0,0]` —— 格式是
+       *   `[left,top][right,bottom]`，含义是**顶边在 y=1292 屏幕像素**，
+       *   即键盘高 2160-1292 = 868px = 视口的 40.2%。
+       *   （起初误读成"键盘高 1292"，等于按 60% 估，抬过头 → 卡片下方露出背景。）
+       *   截图像素扫描独立验证：y=1292 处底色由 (18,18,18) 跳成 (32,32,32)。
+       *
+       * 页面侧可用的量只有 innerHeight（= WebView 高度，键盘弹出时不变，恒 770 CSS），
+       * 所以这里用「屏高比例」而不是视口比例：
+       *   键盘顶边 CSS = 屏高 x KB_TOP_RATIO / dpr
+       * 屏高与 dpr 都能从 window 拿到。
+       */
+      var kbTopScreenPx = 0;             // 壳推送的真实顶边；读不到时保持 0
+      // 键盘顶边占屏高比例：1292 / 2160
+      var KB_TOP_RATIO = 1292 / 2160;
       var MIN_LIFT = 120;
+      var GAP_PX = 0;                    // 卡片底边与键盘顶边之间保留的间距
+
+      // 壳推送真实键盘顶边（屏幕像素）。当前实现里壳读不到（无 DUMP 权限），
+      // 保留这个入口以便将来换手段（如 Shizuku）。桌面浏览器没有这个桥。
+      window.__dshSetKeyboardTop = function (px) {
+        var n = parseInt(px, 10);
+        if (isFinite(n) && n > 0) kbTopScreenPx = n;
+      };
+
+      /**
+       * 键盘顶边在**页面坐标系**里的位置（CSS px）。目标值 469.8。
+       *
+       * 坐标换算依据（真机 dumpsys 实测）：
+       *   · WebView 窗口 frame = [0,0][1080,2116] → **视口顶部就在屏幕 y=0**；
+       *     屏高 2160 与视口 2118 差的 42px 落在**底部**（导航/手势区），不在顶部。
+       *     （所以不能用「屏高 - 视口高」当顶部偏移 —— 那会把键盘位置算低 42px。）
+       *   · 键盘底边贴屏幕底，顶边 = 2160 x KB_TOP_RATIO = 1292 物理像素。
+       *   · window.screen.height = 786 已是 CSS px → 786 x 1292/2160 = 470.1 ✓
+       */
+      var VIEWPORT_TOP_SCREEN_PX = 0;   // 沉浸式布局下视口从屏幕顶部开始
+
+      function keyboardTopCss() {
+        var dpr = window.devicePixelRatio || 1;
+        // 壳推来的是**物理像素**，要除 dpr
+        if (kbTopScreenPx > 0) {
+          return (kbTopScreenPx - VIEWPORT_TOP_SCREEN_PX) / dpr;
+        }
+        // 注意：window.screen.height 返回的是 **CSS px**（本机 786，即 2160/2.75），
+        // 不是物理像素 —— 这里若再除一次 dpr 会算成 171，抬升量直接翻倍（踩过）。
+        var screenHcss = (window.screen && window.screen.height) || 0;
+        if (screenHcss > 0) {
+          return screenHcss * KB_TOP_RATIO;
+        }
+        // 连 screen 都拿不到：退回视口比例估算（本机 469.8/770 ≈ 0.61）
+        return (window.innerHeight || 0) * 0.61;
+      }
+
+      /** 当前需要的抬升量（CSS px）。 */
+      var appliedLift = 0;   // 已经施加的位移，用来还原"未抬升"时的布局位置
+
+      function computeLift() {
+        var stack = document.querySelector("[class*=composerStack]");
+        if (!stack) return 0;
+        var s = stack.getBoundingClientRect();
+        // getBoundingClientRect 返回的是**变换后**的位置：已抬升时 bottom 已经变小。
+        // 加回 appliedLift 才是未抬升的布局位置，否则会越算越小（自我迭代跑飞）。
+        var naturalBottom = s.bottom + appliedLift;
+        // stack 底下还挂着约 32px 的内边距/工具行，卡片底边比 stack 底边高这么多。
+        var card = stack.querySelector("[class*=uV2eYG_card]");
+        var tailPx = card ? (s.bottom - card.getBoundingClientRect().bottom) : 0;
+
+        // 目标：卡片底边落在键盘顶边上方 GAP_PX 处
+        var dpr = window.devicePixelRatio || 1;
+        var targetCardBottomCss = keyboardTopCss() - GAP_PX / dpr;
+        var lift = (naturalBottom - tailPx) - targetCardBottomCss;
+        if (!(lift > 0)) return 0;
+        if (lift < MIN_LIFT) lift = MIN_LIFT;
+        return Math.round(lift);
+      }
 
       var isTextField = function (el) {
         if (!el || el.nodeType !== 1) return false;
@@ -588,11 +668,12 @@
           var root = document.documentElement;
           if (on) {
             injectCss();
-            var k = Math.round((window.innerHeight || 0) * LIFT_RATIO);
-            if (k < MIN_LIFT) k = MIN_LIFT;
+            appliedLift = computeLift();
+            var k = appliedLift > 0 ? appliedLift : MIN_LIFT;
             root.style.setProperty("--dsh-kb-lift", k + "px");
             root.classList.add(ROOT_CLASS);
           } else {
+            appliedLift = 0;
             root.classList.remove(ROOT_CLASS);
           }
           // 桥只作为运行日志（壳侧不再改布局，见 MainActivity.onKeyboardVisibility）。
@@ -601,6 +682,20 @@
           }
         } catch (e) { /* 桥不可用（桌面浏览器）：忽略 */ }
       }
+
+      // 壳拿到真实键盘顶边后回调：重算位移，让卡片底边贴住键盘。
+      // 键盘顶边是异步到的（页面报焦点 → 壳查 IME 窗口 → 推回来），
+      // 所以这里要能"再纠一次"，而不是只在首次抬升时算。
+      window.__dshRecomputeLift = function () {
+        if (!liftOn) return;
+        try {
+          var next = computeLift();
+          if (next > 0 && next !== appliedLift) {
+            appliedLift = next;
+            document.documentElement.style.setProperty("--dsh-kb-lift", next + "px");
+          }
+        } catch (e) { /* 忽略 */ }
+      };
 
       // 关键：**绝不能**在触摸序列中途抬升。
       //

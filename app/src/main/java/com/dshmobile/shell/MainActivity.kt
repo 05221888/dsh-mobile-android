@@ -458,6 +458,14 @@ class MainActivity : ComponentActivity() {
     Log.i("dsh-keyboard", "page reports lift=" + visible + " (layout untouched)")
   }
 
+  /**
+   * 键盘顶边**读不到**，不要再走「壳代读 dumpsys」这条路（2026-09-20 验证）：
+   * 普通 app 身份执行 `dumpsys window` 直接返回 `Can't find service: window` ——
+   * 该服务要求 DUMP 权限，profile 编译的普通 app 拿不到，root 也不便依赖。
+   * 所以键盘高度只能由页面按实测比例估算（见 compat-polyfills.js 的 KB_TOP_RATIO，
+   * 本机实测键盘顶边 = 屏高 x 1292/2160）。此处保留说明，避免以后重复踩。
+   */
+
   /** 沉浸式状态栏持久化读取（设置 → 通用设置 开关；默认收起）。 */
   private fun immersivePrefs(): Boolean {
     return try {

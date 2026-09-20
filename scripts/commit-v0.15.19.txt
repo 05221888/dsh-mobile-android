@@ -1,8 +1,9 @@
-v0.15.19 修复「点击输入框键盘不出来」+ 键盘避让改用页面内抬升
+v0.15.19 修复「点击输入框键盘不出来」+ 输入框与键盘精确贴合
 
-用户反馈：v0.15.18 之后点击输入框键盘不出现。
+用户反馈：① v0.15.18 之后点击输入框键盘不出现；② 修好后输入框与键盘之间
+「露出一点点背景」。
 
-一、根因（真机逐条对照定位）
+一、键盘不出来的根因（真机逐条对照定位）
 
 v0.15.18 的做法是「页面报焦点 → 壳收缩 WebView 布局高度」。真机事件序列：
 
@@ -21,29 +22,47 @@ focusin 夹在 touchend 与浏览器**合成的 mousedown 之间**。旧代码�
 排除项：IME 本身正常（同机同刻 MIUI 设置搜索框 mInputShown=true），不是输入法、
 WebView 或系统的问题。
 
-二、代码改动
+二、输入框与键盘之间的背景（第二部分）
 
-1. MainActivity：applyKeyboardShrink 不再改 WebView 尺寸（只留日志）；新增
-   keyboardLifted 状态与 hideKeyboard()。
-2. compat-polyfills.js [dsh-mobile-keyboard-lift-v5]：抬升改为页面内 transform，
-   并推迟到触摸序列结束之后（scheduleLift，50ms）；抬升条件要求「输入框在焦点上
-   且 document.hasFocus()」（首屏自动聚焦不算）；触摸序列守卫 + 状态去重；
-   双向 500ms 轮询兜底（漏聚焦补抬、悬空抬升收回）。
-3. EngineManager：新增补丁标记 dsh-mobile-keyboard-lift-v2…v5，保证每次都能重铺
+IME 窗口 `mGivenContentInsets=[0,1292][0,0]`，格式是 `[left,top][right,bottom]` ——
+含义是**键盘顶边在 y=1292 物理像素**，即键盘高 2160-1292 = 868px（屏高 40.2%）。
+起初误读成「键盘高 1292」（等于按 60% 估），抬过头，卡片下方露出约 24px 背景。
+截图像素扫描独立验证：y=1292 处底色由 (18,18,18) 跳成 (32,32,32)。
+
+第二个坑：`window.screen.height` 返回的是 **CSS px（本机 786）**，不是物理像素 ——
+再除一次 dpr 会算成 171，抬升量翻倍（卡片飞到屏幕上部）。
+正确算式：`786 x 1292/2160 = 470.1 CSS px`。
+
+顺带确认：壳读不到键盘高度，别再试「壳代读 dumpsys」—— 普通 app 身份执行
+`dumpsys window` 直接返回 `Can't find service: window`（需 DUMP 权限）。
+
+三、代码改动
+
+1. MainActivity：applyKeyboardShrink 不再改 WebView 尺寸（只留日志与状态）；
+   新增 keyboardLifted 与 hideKeyboard()，返回键在键盘弹着时只收键盘。
+2. compat-polyfills.js [dsh-mobile-keyboard-lift-v6]：抬升改为页面内 transform，
+   推迟到触摸序列结束之后（50ms）；抬升量按「卡片底边对齐键盘顶边」计算；
+   抬升条件要求 document.hasFocus()（首屏自动聚焦不算）；触摸序列守卫 +
+   状态去重；双向 500ms 轮询兜底。
+3. EngineManager：补丁标记 dsh-mobile-keyboard-lift-v2…v6，保证每次都能重铺
    （applyAssetPatch 在所有标记都在时会跳过）。
-4. 顺带修复：返回键在键盘弹着时会退出整个 App（IME 窗口 NOT_FOCUSABLE 不吃返回
-   键，dsh 的 SPA 又从不 pushState），现在先收键盘。
 
-三、真机验证（MIX 2S / Android 10 / WebView 83 / 微信输入法）
+四、真机验证（MIX 2S / Android 10 / WebView 83 / 微信输入法）
 
     启动后               composer y 632，lifted=false（自动聚焦但不误抬）
-    点输入框 #1          IME=true，composer y 632 → 355
+    点输入框 #1          IME=true，卡片底边抬到 1293px
+                         vs 键盘顶边 1292px —— 误差 1px，不露背景
     打字                 "hello" 正常显示
-    点消息区收键盘        IME=false，composer 还原 y 632
+    点消息区收键盘        IME=false，位置还原
     再点输入框 #2        IME=true        ← v0.15.18 这里必定失败
     再收再点             IME=true
     BACK 收键盘          IME=false，App 未被退出
     BACK 后再点          IME=true
     连点 5 次            5/5 成功
 
-发布校验：Gitee 上的 APK 重新下载后 SHA256 与本地一致。
+发布校验：Gitee 上的 APK SHA256 与本地一致。
+
+五、已知取舍
+
+- 键盘高度按**屏高比例**（1292/2160）算，本机微信输入法实测稳定（三次弹出一致）。
+  换输入法若高度不同，调 KB_TOP_RATIO 一个常量即可。
