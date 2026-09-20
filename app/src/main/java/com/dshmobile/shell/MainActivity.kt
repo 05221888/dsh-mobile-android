@@ -65,8 +65,6 @@ class MainActivity : ComponentActivity() {
   private var crashInfo: String? = null
   /** 引擎重启 in-flight 守卫（防连点双杀双启）。 */
   private val engineRestarting = java.util.concurrent.atomic.AtomicBoolean(false)
-  /** v0.15.18：键盘弹出时给 WebView 让出的高度（px），由 onCreate 按屏高算。 */
-  private var keyboardShrinkPx: Int = 0
   /** 前台引擎监控：3s 轮询探测，down→测试界面、up→恢复 WebUI
    *  （"设置里杀进程/引擎崩溃回退测试界面"的落地；watchdog 负责恢复）。 */
   private val engineMonitorHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -325,27 +323,22 @@ class MainActivity : ComponentActivity() {
       LogCollector.log("dsh-shell", "app onCreate (dev log on)")
     }
     // 沉浸式：内容延伸到系统栏区域（状态栏常态收起，边缘滑动临时呼出）。
-    // 注意：这一句不能去掉 —— 它是让 IME insets 正常下发的关键。
-    // 2026-09-20 实测：去掉它之后键盘弹出时 innerHeight 恒为 770（insets 不再重算）；
-    // 保留它 + 下面的 padding 监听，键盘弹出时 innerHeight 会 770 → 470，输入框随之上移。
+    // 注意：这一句不能去掉 —— 它是内容铺满系统栏区域的前提，去掉后顶部/底部会出现留白。
     WindowCompat.setDecorFitsSystemWindows(window, false)
     applyImmersive(immersivePrefs())
     val root = FrameLayout(this)
     webView = WebView(this).apply { id = View.generateViewId() }
     root.addView(webView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-    // v0.15.18：键盘弹出时把输入区顶上去，否则打字时看不见自己打的内容。
+    // v0.15.19：键盘避让由页面自己做（transform 抬 composer），壳**不再改 WebView 尺寸**。
     //
-    // 真机（MIX 2S / MIUI / Android 10）实测：系统层拿不到键盘高度 ——
-    //   · App 窗口 attrs 是 adjust=resize，但 IME 窗口是独立 overlay（sim={adjust=pan}），
-    //     键盘弹出后 App 窗口 frame 仍是满屏 [0,0][1080,2160]；
-    //   · 于是 getWindowVisibleDisplayFrame 恒等于屏高、IME insets 不回调、
-    //     WebView 侧 innerHeight 恒 770、visualViewport 收不到 resize/scroll。
-    //   （试过：去 setDecorFitsSystemWindows、去 LAYOUT_STABLE/LAYOUT_FULLSCREEN、
-    //     反射取 IME 窗口、轮询 —— 都拿不到。）
+    // v0.15.18 曾在这里按屏高 42% 收缩 WebView，真机验证证明有害：
+    // 收缩正好落在「输入框聚焦 → IME show 请求在途」的窗口里，布局一变这次
+    // show 就作废，表现即「点输入框键盘不出来」；且 composer 会在手指底下一动，
+    // 用户按原位再点必然落空。详见 compat-polyfills.js [dsh-mobile-keyboard-lift]。
     //
-    // 唯一可靠的信号是**输入框是否聚焦**（页面自己知道）。所以由页面在焦点变化时
-    // 通过桥通知壳，壳把 WebView 高度收缩/还原，键盘区域就空出来了。
-    keyboardShrinkPx = (resources.displayMetrics.heightPixels * 0.42f).toInt()
+    // 真机（MIX 2S / MIUI / Android 10）系统层确实拿不到键盘高度：IME 是独立
+    // overlay（sim={adjust=pan}），App 窗口 frame 恒满屏，getWindowVisibleDisplayFrame
+    // / IME insets / visualViewport 三条路都试过拿不到 —— 所以键盘高度只能按视口比例估算。
     androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
       val ime = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
       val nav = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
@@ -447,21 +440,19 @@ class MainActivity : ComponentActivity() {
    * 做法：收缩 WebView 的布局高度（不是 padding —— padding 只缩绘制区，页面视口不变），
    * 页面视口随之变矮，position:sticky bottom:0 的 composer 就跟着升上来了。
    */
+  /**
+   * v0.15.19：键盘避让改由页面自己做（compat-polyfills.js 的 [dsh-mobile-keyboard-lift]）。
+   *
+   * v0.15.18 这里是「收缩 WebView 布局高度」。真机验证是**有害**的：
+   * 收缩恰好发生在输入框聚焦、IME show 请求还在途中的瞬间，改布局会让这次
+   * show 请求作废 —— 表现就是「点输入框键盘不出来」；而且 composer 会在手指
+   * 底下移位，用户按原位再点必然落空。
+   *
+   * 现在壳不再动布局，只在页面里用 transform 抬 composer，页面坐标系（含点击
+   * 命中）保持不变。这里仅保留日志，便于真机排查键盘时序。
+   */
   private fun applyKeyboardShrink(visible: Boolean) {
-    if (keyboardShrinkPx <= 0) return
-    try {
-      val lp = webView.layoutParams
-      val screenH = resources.displayMetrics.heightPixels
-      val target = if (visible) (screenH - keyboardShrinkPx).coerceAtLeast(screenH / 3)
-      else FrameLayout.LayoutParams.MATCH_PARENT
-      if (lp.height != target) {
-        Log.i("dsh-keyboard", "shrink=" + visible + " -> height=" + target)
-        lp.height = target
-        webView.layoutParams = lp
-      }
-    } catch (t: Throwable) {
-      Log.w("dsh-keyboard", "applyKeyboardShrink failed", t)
-    }
+    Log.i("dsh-keyboard", "page reports lift=" + visible + " (layout untouched)")
   }
 
   /** 沉浸式状态栏持久化读取（设置 → 通用设置 开关；默认收起）。 */

@@ -10,6 +10,9 @@
 
 
 
+
+
+
     <!-- dsh-mobile-compat-old-browser: runtime polyfills for Chromium <93 (Object.hasOwn / Array.at /
          structuredClone / replaceAll / WeakRef ...) + the CSS `inset` shim
          (Chromium <87). Inlined here so it runs BEFORE the module bundle.
@@ -548,18 +551,24 @@
       setInterval(sync, 400);
     } catch (e) { /* 忽略 */ }
 
-    /* ---- 键盘避让（软键盘弹出时把输入框顶上去）[dsh-mobile-keyboard] ---------
-     * 为什么由页面发起：本机（MIUI / Android 10）系统层拿不到键盘高度 ——
-     * IME 窗口是独立 overlay，App 窗口 frame 不随键盘变化，
-     * getWindowVisibleDisplayFrame / IME insets / visualViewport 三条路都试过，统统拿不到。
-     * 唯一可靠的信号是「输入框是否聚焦」，而那只有页面知道。
+    /* ---- 键盘避让：把输入区抬到键盘之上 [dsh-mobile-keyboard-lift-v2] --------
+     * v0.15.19 重写。上一版（v0.15.18）的做法是「页面报焦点 → 壳收缩 WebView 高度」，
+     * 真机上直接把输入搞坏了：收缩正好发生在输入框聚焦、IME show 请求还在途中的那一瞬，
+     * 改 WebView 布局会让这次 show 请求失效 → **点了输入框键盘不出来**。
      *
-     * 所以：页面监听 focusin/focusout（只认 textarea / input），通过桥通知壳收缩
-     * WebView 的布局高度；页面视口随之变矮，position:sticky bottom:0 的 composer 就升上来了。
+     * 现在：WebView 尺寸**一动不动**，只在页面内用 transform 把 composer 抬起来，
+     * 而且推迟到触摸序列跑完再动（见下面 scheduleLift 的注释 —— 这是本版的关键）。
+     * 键盘高度系统依旧不给（IME 是独立 overlay，实测三条路都拿不到），按视口比例估算。
      */
     (function () {
       if (window.__dshKeyboardWired) return;
       window.__dshKeyboardWired = true;
+
+      var CSS_ID = "dsh-kb-lift-css";
+      var ROOT_CLASS = "dsh-kb-up";
+      // 本机（MIX 2S / 1080x2160）实测键盘约占视口的 35%，取 0.36 让输入框刚好落在键盘上方。
+      var LIFT_RATIO = 0.36;
+      var MIN_LIFT = 120;
 
       var isTextField = function (el) {
         if (!el || el.nodeType !== 1) return false;
@@ -572,31 +581,98 @@
         return el.isContentEditable === true;
       };
 
-      var notify = function (visible) {
+      function injectCss() {
         try {
+          if (document.getElementById(CSS_ID)) return;
+          var style = document.createElement("style");
+          style.id = CSS_ID;
+          // 只位移 composerStack，**不要**再给 scrollBody 加 padding-bottom：
+          // 实测两者会叠加（transform -277 与 padding 277 各推一次），composer 会飞到
+          // 屏幕上部（y 632 → 78）。只用 transform，位移量精确可控。
+          style.textContent = [
+            "html." + ROOT_CLASS + " [class*=composerStack] {",
+            "  transform: translateY(calc(-1 * var(--dsh-kb-lift, 280px))) !important;",
+            "}",
+          ].join("\n");
+          (document.head || document.documentElement).appendChild(style);
+        } catch (e) { /* 文档未就绪：等下次聚焦 */ }
+      }
+
+      // 故意不设「已聚焦」闩锁：抬升是幂等的，而闩锁一旦因某次 focusout 丢失
+      // 就会永久卡住，后面所有聚焦都不再响应（v0.15.18 的坑之一）。
+      function setLift(on) {
+        try {
+          var root = document.documentElement;
+          if (on) {
+            injectCss();
+            var k = Math.round((window.innerHeight || 0) * LIFT_RATIO);
+            if (k < MIN_LIFT) k = MIN_LIFT;
+            root.style.setProperty("--dsh-kb-lift", k + "px");
+            root.classList.add(ROOT_CLASS);
+          } else {
+            root.classList.remove(ROOT_CLASS);
+          }
+          // 桥只作为运行日志（壳侧不再改布局，见 MainActivity.onKeyboardVisibility）。
           if (window.androidBridge && typeof window.androidBridge.setKeyboardVisible === "function") {
-            window.androidBridge.setKeyboardVisible(visible);
+            window.androidBridge.setKeyboardVisible(on);
           }
         } catch (e) { /* 桥不可用（桌面浏览器）：忽略 */ }
-      };
+      }
 
-      var focused = false;
+      // 关键：**绝不能**在触摸序列中途抬升。
+      //
+      // 真机实测（MIX 2S / WebView 83）一次点输入框的事件顺序是：
+      //   touchstart → touchend → focusin → mousedown → mouseup → click
+      // focusin 夹在 touchend 和浏览器合成的 mousedown **之间**。若在 focusin 里立刻
+      // 位移 composer，等那个 mousedown 派发时手指坐标下的元素已经换人 → 它落到
+      // scrollBody 上，浏览器随即把焦点从 textarea 抢走（focusout），IME 的 show
+      // 请求随之作废 —— 现象就是「点输入框键盘不出来」。
+      // （对照实验：把位移量强制为 0px、其余逻辑不变 → mousedown 命中 TEXTAREA、
+      //   焦点留住、mInputShown=true，键盘正常弹出。至此定位完毕。）
+      //
+      // 所以推迟到整轮事件跑完再动布局；抬手之后位移不会再影响任何命中判定。
+      var LIFT_DELAY_MS = 50;
+      var liftTimer = 0;
+      function scheduleLift() {
+        if (liftTimer) clearTimeout(liftTimer);
+        liftTimer = setTimeout(function () {
+          liftTimer = 0;
+          setLift(true);
+        }, LIFT_DELAY_MS);
+      }
+
       document.addEventListener("focusin", function (e) {
-        if (!isTextField(e.target) || focused) return;
-        focused = true;
-        // 等一小会儿，避开「聚焦瞬间页面还在滚动」的竞态
-        setTimeout(function () { notify(true); }, 60);
+        if (isTextField(e.target)) scheduleLift();
+      }, true);
+
+      // 再点已在焦点里的输入框不会触发 focusin，但用户确实是想再打键盘 —— 补一次。
+      document.addEventListener("click", function (e) {
+        if (isTextField(e.target)) scheduleLift();
       }, true);
 
       document.addEventListener("focusout", function (e) {
         if (!isTextField(e.target)) return;
         // 焦点可能只是移到另一个输入框：下一轮事件循环再确认
         setTimeout(function () {
-          if (isTextField(document.activeElement)) return;
-          focused = false;
-          notify(false);
-        }, 120);
+          if (!isTextField(document.activeElement)) setLift(false);
+        }, 80);
       }, true);
+
+      // 兜底收回：返回键收键盘时焦点可能残留在输入框上，只靠 focusout 收不回来，
+      // composer 会一直悬在屏幕中间。页面失焦 / 切后台时无条件还原。
+      window.addEventListener("blur", function () { setLift(false); });
+      document.addEventListener("visibilitychange", function () {
+        if (document.hidden) setLift(false);
+      });
+
+      // 最后一道保险：轮询确认「没有输入框在焦点上就还原」。多条异常路径
+      // （返回键收键盘、切走再切回、输入框被卸载）都会留下悬空的抬升，
+      // 而 setLift 幂等，这里多跑几次没有副作用。
+      setInterval(function () {
+        try {
+          if (!isTextField(document.activeElement)) setLift(false);
+        } catch (e) { /* 忽略 */ }
+      }, 500);
     })();
   })();
 })();
