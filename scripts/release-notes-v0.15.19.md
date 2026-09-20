@@ -36,13 +36,29 @@ focusin 夹在 touchend 与浏览器**合成的 mousedown 之间**。旧代码�
 
 三、真机验证（MIX 2S / Android 10 / WebView 83 / 微信输入法）
 
-   点输入框 #1        IME=true
-   打字               文字正常显示在输入框
-   点消息区收键盘      IME=false，位置还原（composer y 355 → 632）
-   再点输入框 #2      IME=true   ← v0.15.18 这里必定失败
-   第三次              IME=true
-   连点 5 次          5/5 成功
+完整回归（坐标为页面实测，不靠拍屏猜）：
 
-键盘弹出时几何（CSS px / 屏幕 px）：
-- composerStack y 632 → 355，视口 innerHeight 保持 770（不再收缩）
-- 输入框底部 1150px，估算键盘顶边 1355px → 输入内容完整可见
+   启动后               composer y 632，lifted=false（自动聚焦但不误抬）
+   点输入框 #1          IME=true，composer y 632 → 355
+   打字                 "hello" 正常显示在输入框里
+   点消息区收键盘        IME=false，composer 还原 y 632
+   再点输入框 #2        IME=true        ← v0.15.18 这里必定失败
+   再收再点             IME=true
+   BACK 收键盘          IME=false，App 未被退出
+   BACK 后再点          IME=true
+   连点 5 次            5/5 成功
+
+四、顺带修掉的两个问题
+
+1. **返回键会误退 App**：IME 窗口是 `fl=NOT_FOCUSABLE` 的独立 overlay，自己不吃
+   返回键；键盘弹着时按返回 / 左滑，事件直接落到 Activity，而 dsh 的 SPA 从不
+   pushState（canGoBack 恒 false）→ 整个 App 被退到桌面。
+   现在 MainActivity.onBackPressed 先判断「键盘是否抬起」，是则只收键盘。
+2. **抬升状态去重**：早期实现里 500ms 轮询每轮都写 classList + 打桥日志，
+   logcat 被刷屏。改为状态不变就不动手。
+
+五、已知取舍
+
+- 键盘高度系统仍拿不到，抬升量按视口 36% 估算（本机键盘约占 39~45%，取偏小值
+  保证输入框一定落在键盘上方）。换输入法若偏差大，调 LIFT_RATIO 即可。
+- 抬升用 transform，不改 WebView 尺寸，因此点击命中与页面坐标系完全不受影响。

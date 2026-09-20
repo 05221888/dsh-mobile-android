@@ -65,6 +65,8 @@ class MainActivity : ComponentActivity() {
   private var crashInfo: String? = null
   /** 引擎重启 in-flight 守卫（防连点双杀双启）。 */
   private val engineRestarting = java.util.concurrent.atomic.AtomicBoolean(false)
+  /** v0.15.19：页面报告「输入框在焦点上、composer 已抬起」——返回键据此先收键盘。 */
+  @Volatile private var keyboardLifted = false
   /** 前台引擎监控：3s 轮询探测，down→测试界面、up→恢复 WebUI
    *  （"设置里杀进程/引擎崩溃回退测试界面"的落地；watchdog 负责恢复）。 */
   private val engineMonitorHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -452,6 +454,7 @@ class MainActivity : ComponentActivity() {
    * 命中）保持不变。这里仅保留日志，便于真机排查键盘时序。
    */
   private fun applyKeyboardShrink(visible: Boolean) {
+    keyboardLifted = visible
     Log.i("dsh-keyboard", "page reports lift=" + visible + " (layout untouched)")
   }
 
@@ -526,8 +529,41 @@ class MainActivity : ComponentActivity() {
     pushSystemDark(webView)
   }
 
+  /**
+   * 返回键：键盘开着就先收键盘，别把整个 App 退掉。
+   *
+   * 真机实测（MIX 2S / MIUI / 微信输入法）：IME 窗口是 `fl=NOT_FOCUSABLE` 的独立
+   * overlay，**它自己不吃返回键**。于是键盘弹着时按返回 / 左滑手势，事件直接落到
+   * Activity 上；dsh 的 SPA 又从不 pushState（canGoBack 恒 false），结果一路
+   * super.onBackPressed() → 整个 App 被退到桌面。这是很反直觉的体验。
+   */
   override fun onBackPressed() {
+    if (keyboardLifted) {
+      hideKeyboard()
+      return
+    }
     if (webView.canGoBack()) webView.goBack() else super.onBackPressed()
+  }
+
+  /**
+   * 收键盘：只让页面失焦，**不要在壳侧改 DOM**。
+   *
+   * 页面里 setLift 有「状态没变就不重复执行」的去重（避免 500ms 轮询刷屏）。
+   * 如果壳直接 classList.remove('dsh-kb-up')，页面内部的 liftOn 仍为 true，
+   * 下次聚焦时 setLift(true) 会被去重挡掉 → 抬升再也不生效。
+   * 交给页面的 focusout / 轮询走正规路径撤销，状态才一致。
+   */
+  private fun hideKeyboard() {
+    webView.evaluateJavascript(
+      "(function(){try{var a=document.activeElement;if(a&&a.blur)a.blur();}catch(e){}})()",
+      null,
+    )
+    try {
+      val imm = getSystemService(android.view.inputmethod.InputMethodManager::class.java)
+      imm?.hideSoftInputFromWindow(webView.windowToken, 0)
+    } catch (t: Throwable) {
+      Log.w("dsh-keyboard", "hideSoftInputFromWindow failed", t)
+    }
   }
 
   private fun configureWebView() {

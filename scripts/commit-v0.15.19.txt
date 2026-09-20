@@ -1,0 +1,49 @@
+v0.15.19 修复「点击输入框键盘不出来」+ 键盘避让改用页面内抬升
+
+用户反馈：v0.15.18 之后点击输入框键盘不出现。
+
+一、根因（真机逐条对照定位）
+
+v0.15.18 的做法是「页面报焦点 → 壳收缩 WebView 布局高度」。真机事件序列：
+
+    touchstart → touchend → focusin → mousedown → mouseup → click
+
+focusin 夹在 touchend 与浏览器**合成的 mousedown 之间**。旧代码在 focusin 里立刻
+收缩 WebView / 位移 composer，于是：
+
+1. WebView 布局在 IME show 请求在途时被改动 → 这次 show 作废；
+2. 等合成的 mousedown 派发时，手指坐标下的元素已经换人（落到 scrollBody 上），
+   浏览器随即把焦点从 textarea 抢走（focusout），键盘再也没机会弹出。
+
+决定性对照：把抬升位移量强制为 0px、其余逻辑完全不变 → mousedown 命中 TEXTAREA、
+焦点留住、mInputShown=true，键盘正常弹出；恢复位移则复现故障。
+
+排除项：IME 本身正常（同机同刻 MIUI 设置搜索框 mInputShown=true），不是输入法、
+WebView 或系统的问题。
+
+二、代码改动
+
+1. MainActivity：applyKeyboardShrink 不再改 WebView 尺寸（只留日志）；新增
+   keyboardLifted 状态与 hideKeyboard()。
+2. compat-polyfills.js [dsh-mobile-keyboard-lift-v5]：抬升改为页面内 transform，
+   并推迟到触摸序列结束之后（scheduleLift，50ms）；抬升条件要求「输入框在焦点上
+   且 document.hasFocus()」（首屏自动聚焦不算）；触摸序列守卫 + 状态去重；
+   双向 500ms 轮询兜底（漏聚焦补抬、悬空抬升收回）。
+3. EngineManager：新增补丁标记 dsh-mobile-keyboard-lift-v2…v5，保证每次都能重铺
+   （applyAssetPatch 在所有标记都在时会跳过）。
+4. 顺带修复：返回键在键盘弹着时会退出整个 App（IME 窗口 NOT_FOCUSABLE 不吃返回
+   键，dsh 的 SPA 又从不 pushState），现在先收键盘。
+
+三、真机验证（MIX 2S / Android 10 / WebView 83 / 微信输入法）
+
+    启动后               composer y 632，lifted=false（自动聚焦但不误抬）
+    点输入框 #1          IME=true，composer y 632 → 355
+    打字                 "hello" 正常显示
+    点消息区收键盘        IME=false，composer 还原 y 632
+    再点输入框 #2        IME=true        ← v0.15.18 这里必定失败
+    再收再点             IME=true
+    BACK 收键盘          IME=false，App 未被退出
+    BACK 后再点          IME=true
+    连点 5 次            5/5 成功
+
+发布校验：Gitee 上的 APK 重新下载后 SHA256 与本地一致。

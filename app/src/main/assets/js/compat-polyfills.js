@@ -529,7 +529,7 @@
       setInterval(sync, 400);
     } catch (e) { /* 忽略 */ }
 
-    /* ---- 键盘避让：把输入区抬到键盘之上 [dsh-mobile-keyboard-lift-v2] --------
+    /* ---- 键盘避让：把输入区抬到键盘之上 [dsh-mobile-keyboard-lift-v5] --------
      * v0.15.19 重写。上一版（v0.15.18）的做法是「页面报焦点 → 壳收缩 WebView 高度」，
      * 真机上直接把输入搞坏了：收缩正好发生在输入框聚焦、IME show 请求还在途中的那一瞬，
      * 改 WebView 布局会让这次 show 请求失效 → **点了输入框键盘不出来**。
@@ -578,7 +578,12 @@
 
       // 故意不设「已聚焦」闩锁：抬升是幂等的，而闩锁一旦因某次 focusout 丢失
       // 就会永久卡住，后面所有聚焦都不再响应（v0.15.18 的坑之一）。
+      // 但仍要挡住「状态没变」的重复调用 —— 否则 500ms 轮询会每轮都写一次
+      // classList 和桥日志（真机 logcat 会被刷屏）。
+      var liftOn = false;
       function setLift(on) {
+        if (on === liftOn) return;
+        liftOn = on;
         try {
           var root = document.documentElement;
           if (on) {
@@ -619,6 +624,16 @@
         }, LIFT_DELAY_MS);
       }
 
+      // 是否需要抬升：**输入框在焦点上，且页面自身是前台焦点**。
+      //
+      // 后半句不能省：dsh 首屏会把 textarea 自动聚焦，但此时并没有键盘
+      // （实测启动后 mInputShown=false、document.hasFocus()=false）。
+      // 只看 activeElement 会在启动时就把 composer 抬起来，页面一进来就是错的。
+      // 键盘真正弹出时页面必然持有窗口焦点（真机验证：点输入框后 hasFocus=true）。
+      function wantsLift() {
+        return document.hasFocus() && isTextField(document.activeElement);
+      }
+
       document.addEventListener("focusin", function (e) {
         if (isTextField(e.target)) scheduleLift();
       }, true);
@@ -632,7 +647,7 @@
         if (!isTextField(e.target)) return;
         // 焦点可能只是移到另一个输入框：下一轮事件循环再确认
         setTimeout(function () {
-          if (!isTextField(document.activeElement)) setLift(false);
+          if (!wantsLift()) setLift(false);
         }, 80);
       }, true);
 
@@ -643,12 +658,32 @@
         if (document.hidden) setLift(false);
       });
 
-      // 最后一道保险：轮询确认「没有输入框在焦点上就还原」。多条异常路径
-      // （返回键收键盘、切走再切回、输入框被卸载）都会留下悬空的抬升，
-      // 而 setLift 幂等，这里多跑几次没有副作用。
+      // 触摸序列守卫：手指还没抬干净时，轮询绝不许动布局。
+      // 否则一次轮询恰好落在 focusin 与合成 mousedown 之间（约 3ms 的窗口），
+      // 就会重演 v0.15.18「位移抢焦点 → 键盘不出来」的老 bug。
+      var touchActive = false;
+      var touchTimer = 0;
+      function markTouch() {
+        touchActive = true;
+        if (touchTimer) clearTimeout(touchTimer);
+        // 留 400ms 余量：mousedown/click 都排在 touchend 之后极短时间内
+        touchTimer = setTimeout(function () { touchActive = false; }, 400);
+      }
+      document.addEventListener("touchstart", markTouch, true);
+      document.addEventListener("touchend", markTouch, true);
+
+      // 最后一道保险，且是**双向**的：既收拾悬空的抬升，也能补上漏掉的一次聚焦。
+      //
+      // 为什么需要补：WebView 首屏加载 / 页面恢复时，输入框可能在我们挂上监听之前
+      // 就已经是 activeElement（真机复现过：刚进页面点一次输入框，键盘弹了但
+      // composer 没抬起来）。只靠 focusin 会漏掉这种「聚焦早于监听」的情况。
+      //
+      // 安全性：① 触摸序列进行中一律跳过（见上面的 touchActive 守卫），
+      // ② setLift 自带去重，状态没变不写 DOM、不打日志。
       setInterval(function () {
         try {
-          if (!isTextField(document.activeElement)) setLift(false);
+          if (touchActive) return;
+          setLift(wantsLift());
         } catch (e) { /* 忽略 */ }
       }, 500);
     })();
