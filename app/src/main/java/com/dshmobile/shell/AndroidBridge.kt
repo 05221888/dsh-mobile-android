@@ -39,6 +39,8 @@ class AndroidBridge(
    * @param shrink true = 键盘要弹了（收缩），false = 收起了（还原）
    */
   private val onKeyboardVisibility: (shrink: Boolean) -> Unit = {},
+  /** v0.15.19：键盘当前是否真的在显示（页面判断不了，见 isKeyboardShown）。 */
+  private val onIsKeyboardShown: () -> Boolean = { false },
 ) {
 
   /** 页面通知：软键盘将弹出 / 已收起。 */
@@ -46,6 +48,20 @@ class AndroidBridge(
   fun setKeyboardVisible(visible: Boolean) {
     onKeyboardVisibility(visible)
   }
+
+  /**
+   * 键盘**当前是否真的在显示**（v0.15.19）。
+   *
+   * 页面自己判断不了这件事：返回键收键盘 / 切换输入法时，textarea 可能仍是
+   * activeElement，页面无从得知键盘已经没了（真机上表现为 composer 一直悬在
+   * 屏幕中间，用户再点底部的输入框位置会落空，要点第二次）。
+   *
+   * `InputMethodManager.isAcceptingText()` 经真机验证与键盘可见性完全一致
+   * （键盘弹出 true → 返回键收起 false），且不受 DUMP 权限限制 ——
+   * `dumpsys input_method` / `dumpsys window` 两条路普通 app 都读不到。
+   */
+  @JavascriptInterface
+  fun isKeyboardShown(): Boolean = onIsKeyboardShown()
 
   @JavascriptInterface
   fun version(): String = "1.0"

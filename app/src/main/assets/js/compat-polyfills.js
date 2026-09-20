@@ -529,7 +529,7 @@
       setInterval(sync, 400);
     } catch (e) { /* 忽略 */ }
 
-    /* ---- 键盘避让：把输入区抬到键盘之上 [dsh-mobile-keyboard-lift-v6] --------
+    /* ---- 键盘避让：把输入区抬到键盘之上 [dsh-mobile-keyboard-lift-v7] --------
      * v0.15.19 重写。上一版（v0.15.18）的做法是「页面报焦点 → 壳收缩 WebView 高度」，
      * 真机上直接把输入搞坏了：收缩正好发生在输入框聚焦、IME show 请求还在途中的那一瞬，
      * 改 WebView 布局会让这次 show 请求失效 → **点了输入框键盘不出来**。
@@ -553,20 +553,30 @@
        * `Can't find service: window`（需要 DUMP 权限），所以只能量一次、写死比例。
        *
        * 2026-09-20 真机实测（MIX 2S / 1080x2160 / dpr 2.75 / 微信输入法）：
-       *   IME 窗口 `mGivenContentInsets=[0,1292][0,0]` —— 格式是
-       *   `[left,top][right,bottom]`，含义是**顶边在 y=1292 屏幕像素**，
-       *   即键盘高 2160-1292 = 868px = 视口的 40.2%。
-       *   （起初误读成"键盘高 1292"，等于按 60% 估，抬过头 → 卡片下方露出背景。）
-       *   截图像素扫描独立验证：y=1292 处底色由 (18,18,18) 跳成 (32,32,32)。
+       *   键盘顶边 = **1352 物理像素**（详见下面 KB_TOP_RATIO 的注释）。
        *
-       * 页面侧可用的量只有 innerHeight（= WebView 高度，键盘弹出时不变，恒 770 CSS），
-       * 所以这里用「屏高比例」而不是视口比例：
-       *   键盘顶边 CSS = 屏高 x KB_TOP_RATIO / dpr
-       * 屏高与 dpr 都能从 window 拿到。
+       * 页面侧可用的量只有 innerHeight（= WebView 高度，键盘弹出时不变，恒 770 CSS）、
+       * window.screen.height（786 CSS px，注意已是 CSS 单位）与 devicePixelRatio，
+       * 所以用「屏高比例」换算：键盘顶边 CSS = screen.height x KB_TOP_RATIO。
        */
       var kbTopScreenPx = 0;             // 壳推送的真实顶边；读不到时保持 0
-      // 键盘顶边占屏高比例：1292 / 2160
-      var KB_TOP_RATIO = 1292 / 2160;
+      /**
+       * 键盘顶边占屏高比例。
+       *
+       * 2026-09-20 真机重新校准（MIX 2S / 1080x2160 / dpr 2.75 / 微信输入法）：
+       *   键盘顶边 = **1352 物理像素** → 1352/2160 = 0.6259。
+       *   验证：window.screen.height(786 CSS) x 0.6259 = 492 CSS = 1353px ✓
+       *
+       * 之前写的是 1292/2160，那是在**候选栏展开**时读到的值；候选栏收起后
+       * 键盘变高，顶边升到 1352。用 1292 会让卡片底边比键盘高出 59px
+       * —— 就是用户看到的"输入框和键盘之间还有缝隙"。
+       *
+       * 测量方法（重要，别再踩）：必须先把抬升量钉成 0 再拍"弹出/收起"两张截图做差异，
+       * 否则抬升动作本身会污染差异，读出来的边界是 composer 的而不是键盘的。
+       * 另：本机键盘底色 (20,20,20) 与页面底色 (18,18,18) 极接近，
+       * 用"亮度阈值"扫描会漏掉，要找那条分隔线（亮度约 55）或直接做像素差异。
+       */
+      var KB_TOP_RATIO = 1352 / 2160;
       var MIN_LIFT = 120;
       var GAP_PX = 0;                    // 卡片底边与键盘顶边之间保留的间距
 
@@ -578,14 +588,14 @@
       };
 
       /**
-       * 键盘顶边在**页面坐标系**里的位置（CSS px）。目标值 469.8。
+       * 键盘顶边在**页面坐标系**里的位置（CSS px）。目标值 492。
        *
-       * 坐标换算依据（真机 dumpsys 实测）：
+       * 坐标换算依据（真机实测）：
        *   · WebView 窗口 frame = [0,0][1080,2116] → **视口顶部就在屏幕 y=0**；
        *     屏高 2160 与视口 2118 差的 42px 落在**底部**（导航/手势区），不在顶部。
        *     （所以不能用「屏高 - 视口高」当顶部偏移 —— 那会把键盘位置算低 42px。）
-       *   · 键盘底边贴屏幕底，顶边 = 2160 x KB_TOP_RATIO = 1292 物理像素。
-       *   · window.screen.height = 786 已是 CSS px → 786 x 1292/2160 = 470.1 ✓
+       *   · 键盘顶边 = 1352 物理像素（像素差异法实测，先钉住抬升量再拍）。
+       *   · window.screen.height = 786 已是 CSS px → 786 x 1352/2160 = 492 ✓
        */
       var VIEWPORT_TOP_SCREEN_PX = 0;   // 沉浸式布局下视口从屏幕顶部开始
 
@@ -601,8 +611,8 @@
         if (screenHcss > 0) {
           return screenHcss * KB_TOP_RATIO;
         }
-        // 连 screen 都拿不到：退回视口比例估算（本机 469.8/770 ≈ 0.61）
-        return (window.innerHeight || 0) * 0.61;
+        // 连 screen 都拿不到：退回视口比例估算（本机 492/770 ≈ 0.639）
+        return (window.innerHeight || 0) * 0.639;
       }
 
       /** 当前需要的抬升量（CSS px）。 */
@@ -725,7 +735,22 @@
       // （实测启动后 mInputShown=false、document.hasFocus()=false）。
       // 只看 activeElement 会在启动时就把 composer 抬起来，页面一进来就是错的。
       // 键盘真正弹出时页面必然持有窗口焦点（真机验证：点输入框后 hasFocus=true）。
+      //
+      // 更强的一道依据：壳的 isKeyboardShown()（InputMethodManager.isAcceptingText）
+      // 能直接反映键盘是否真的在显示 —— 页面自己判断不了这件事（返回键收键盘时
+      // textarea 仍是 activeElement）。有它就以它为准，拿不到再退回焦点判断。
+      function keyboardReallyShown() {
+        try {
+          if (window.androidBridge && typeof window.androidBridge.isKeyboardShown === "function") {
+            return window.androidBridge.isKeyboardShown() === true;
+          }
+        } catch (e) { /* 桥不可用：退回焦点判断 */ }
+        return null;   // null = 未知，调用方自行决定
+      }
+
       function wantsLift() {
+        var real = keyboardReallyShown();
+        if (real !== null) return real;
         return document.hasFocus() && isTextField(document.activeElement);
       }
 
@@ -734,8 +759,28 @@
       }, true);
 
       // 再点已在焦点里的输入框不会触发 focusin，但用户确实是想再打键盘 —— 补一次。
+      //
+      // 另外处理「陈旧焦点」：返回键 / 点别处收键盘后，textarea 常常**仍是
+      // activeElement**（Android 的行为），此时再点它不产生新的 focusin，
+      // IME 也可能不重新弹 —— 用户得点第二次（真机复现过 S3 失败 / S4 才成功）。
+      //
+      // 修法：发现「已聚焦但键盘其实不在」时，把这份陈旧焦点清掉；随后浏览器会为
+      // 这次点击重新聚焦（新的一轮 focusin），IME 自然重新弹出。
+      // 注意别在触摸序列中途做（同 scheduleLift 的理由：会抢走这次点击的焦点）。
       document.addEventListener("click", function (e) {
-        if (isTextField(e.target)) scheduleLift();
+        if (!isTextField(e.target)) return;
+        setTimeout(function () {
+          scheduleLift();
+          var real = keyboardReallyShown();
+          if (real === false && isTextField(document.activeElement)) {
+            try { document.activeElement.blur(); } catch (err) { /* 忽略 */ }
+            setTimeout(function () {
+              if (!isTextField(document.activeElement)) {
+                try { e.target.focus(); } catch (err) { /* 忽略 */ }
+              }
+            }, 0);
+          }
+        }, 0);
       }, true);
 
       document.addEventListener("focusout", function (e) {
@@ -767,20 +812,23 @@
       document.addEventListener("touchstart", markTouch, true);
       document.addEventListener("touchend", markTouch, true);
 
-      // 最后一道保险，且是**双向**的：既收拾悬空的抬升，也能补上漏掉的一次聚焦。
+      // 最后一道保险，也是**权威依据**：轮询壳的 isKeyboardShown()，让抬升严格
+      // 跟随键盘的真实存在，而不是"看起来像聚焦"。
       //
-      // 为什么需要补：WebView 首屏加载 / 页面恢复时，输入框可能在我们挂上监听之前
-      // 就已经是 activeElement（真机复现过：刚进页面点一次输入框，键盘弹了但
-      // composer 没抬起来）。只靠 focusin 会漏掉这种「聚焦早于监听」的情况。
+      // 这解决了真机上最难缠的一类状态：按返回键 / 点屏幕其它地方收键盘后，
+      // textarea 仍是 activeElement，页面以为还在输入 —— composer 一直悬在屏幕
+      // 中间（键盘已没了），用户去点底部原来的输入框位置反而落空，得点第二次。
+      // 有了 isKeyboardShown()，键盘一消失抬升就自动撤掉。
       //
-      // 安全性：① 触摸序列进行中一律跳过（见上面的 touchActive 守卫），
+      // 安全性：① 触摸序列进行中一律跳过（touchActive 守卫），否则一次轮询恰好
+      // 落在 focusin 与合成 mousedown 之间就会重演「位移抢焦点」的老 bug；
       // ② setLift 自带去重，状态没变不写 DOM、不打日志。
       setInterval(function () {
         try {
           if (touchActive) return;
           setLift(wantsLift());
         } catch (e) { /* 忽略 */ }
-      }, 500);
+      }, 300);
     })();
   })();
 })();

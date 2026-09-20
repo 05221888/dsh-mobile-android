@@ -433,16 +433,6 @@ class MainActivity : ComponentActivity() {
   }
 
   /**
-   * v0.15.18：键盘避让。页面在输入框聚焦/失焦时经桥调用。
-   *
-   * 为什么不让系统算：本机 MIUI/Android 10 上 IME 是独立 overlay，App 窗口 frame 不随
-   * 键盘变化 —— getWindowVisibleDisplayFrame / IME insets / visualViewport 三条路都拿不到
-   * 键盘高度（真机逐条验证过）。唯一可靠信号是「输入框是否聚焦」，而那只有页面知道。
-   *
-   * 做法：收缩 WebView 的布局高度（不是 padding —— padding 只缩绘制区，页面视口不变），
-   * 页面视口随之变矮，position:sticky bottom:0 的 composer 就跟着升上来了。
-   */
-  /**
    * v0.15.19：键盘避让改由页面自己做（compat-polyfills.js 的 [dsh-mobile-keyboard-lift]）。
    *
    * v0.15.18 这里是「收缩 WebView 布局高度」。真机验证是**有害**的：
@@ -451,11 +441,54 @@ class MainActivity : ComponentActivity() {
    * 底下移位，用户按原位再点必然落空。
    *
    * 现在壳不再动布局，只在页面里用 transform 抬 composer，页面坐标系（含点击
-   * 命中）保持不变。这里仅保留日志，便于真机排查键盘时序。
+   * 命中）保持不变。这里记录状态（返回键要用）并留日志便于真机排查键盘时序。
+   *
+   * 键盘顶边**读不到**，不要再试「壳代读 dumpsys」：普通 app 身份执行
+   * `dumpsys window` 直接返回 `Can't find service: window`（该服务要求 DUMP 权限）。
+   * 所以键盘高度由页面按实测比例算（见 KB_TOP_RATIO，本机 1352/2160）。
    */
   private fun applyKeyboardShrink(visible: Boolean) {
     keyboardLifted = visible
     Log.i("dsh-keyboard", "page reports lift=" + visible + " (layout untouched)")
+    // 页面说「用户点输入框了」，就顺手确保键盘真的弹出来。
+    //
+    // 必要性：返回键 / 点别处收键盘后，textarea 往往仍是 activeElement，
+    // 页面随后再收到点击时只走 focus（不产生新的 IME show 请求），键盘不会自己
+    // 回来 —— 真机上表现为"再点输入框没反应，得点第二次"。
+    //
+    // 与 v0.15.18 的区别：这里**不动布局**，只是补发一次 show 请求。
+    // 当时的故障根因是"改 WebView 尺寸"让在途的 show 作废，补发 show 无害。
+    // 页面侧已把通知推迟到触摸序列之后，此刻发请求不会打断点击。
+    if (visible) {
+      try {
+        getSystemService(android.view.inputmethod.InputMethodManager::class.java)
+          ?.showSoftInput(webView, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+      } catch (t: Throwable) {
+        Log.w("dsh-keyboard", "showSoftInput failed", t)
+      }
+    }
+  }
+
+  /**
+   * 键盘当前是否真的在显示 —— 用 InputMethodManager.isAcceptingText()。
+   *
+   * 真机验证（2026-09-20）：该值与键盘可见性完全一致
+   * （弹出 true / 返回键收起 false），且**不需要 DUMP 权限**。
+   * 对比之下 `dumpsys input_method` 与 `dumpsys window` 普通 app 身份都读不到
+   * （Permission Denial: missing android.permission.DUMP）。
+   *
+   * 页面为什么需要它：返回键 / 切输入法收键盘时，textarea 往往仍是
+   * activeElement，页面根本不知道键盘没了 —— composer 会一直悬在屏幕中间，
+   * 用户再点底部原位置会落空，得点第二次（真机复现过）。
+   */
+  private fun isKeyboardShown(): Boolean {
+    return try {
+      getSystemService(android.view.inputmethod.InputMethodManager::class.java)
+        ?.isAcceptingText == true
+    } catch (t: Throwable) {
+      Log.w("dsh-keyboard", "isAcceptingText failed", t)
+      false
+    }
   }
 
   /**
@@ -546,6 +579,7 @@ class MainActivity : ComponentActivity() {
    * super.onBackPressed() → 整个 App 被退到桌面。这是很反直觉的体验。
    */
   override fun onBackPressed() {
+    Log.i("dsh-keyboard", "onBackPressed: keyboardLifted=" + keyboardLifted)
     if (keyboardLifted) {
       hideKeyboard()
       return
@@ -554,16 +588,37 @@ class MainActivity : ComponentActivity() {
   }
 
   /**
-   * 收键盘：只让页面失焦，**不要在壳侧改 DOM**。
+   * 返回键的第一道拦截。
    *
-   * 页面里 setLift 有「状态没变就不重复执行」的去重（避免 500ms 轮询刷屏）。
-   * 如果壳直接 classList.remove('dsh-kb-up')，页面内部的 liftOn 仍为 true，
-   * 下次聚焦时 setLift(true) 会被去重挡掉 → 抬升再也不生效。
-   * 交给页面的 focusout / 轮询走正规路径撤销，状态才一致。
+   * 真机实测：键盘弹着时按返回，**系统/IME 会先把返回键消费掉**（键盘自己收起），
+   * `onBackPressed()` 根本不会被调用 —— 于是页面不知道键盘已收起，composer 一直
+   * 悬在屏幕中间，用户再点屏幕底部（composer 原来的位置）会落空，要点第二次。
+   * 这里在分发给窗口之前先看一眼：键盘抬着时自己处理，收键盘并撤掉页面抬升。
+   */
+  override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+    if (event.keyCode == android.view.KeyEvent.KEYCODE_BACK &&
+      event.action == android.view.KeyEvent.ACTION_UP && keyboardLifted
+    ) {
+      Log.i("dsh-keyboard", "dispatchKeyEvent: BACK with keyboard up -> hide")
+      hideKeyboard()
+      return true
+    }
+    return super.dispatchKeyEvent(event)
+  }
+
+  /**
+   * 收键盘：让页面失焦并撤掉抬升，再请系统收起 IME。
+   *
+   * 注意顺序：先同步撤掉页面的抬升（否则会看到 composer 悬在半空的中间态），
+   * 再 blur、再 hideSoftInput。页面里的 liftOn 会因这次 class 移除而与实际不符，
+   * 但紧接着的 blur 会触发 focusout → setLift(false)，两者收敛到同一状态；
+   * 且每次抬升前 setLift(true) 之前都会重算，不会因此卡住。
    */
   private fun hideKeyboard() {
     webView.evaluateJavascript(
-      "(function(){try{var a=document.activeElement;if(a&&a.blur)a.blur();}catch(e){}})()",
+      "(function(){try{var a=document.activeElement;if(a&&a.blur)a.blur();" +
+        "document.documentElement.classList.remove('dsh-kb-up');" +
+        "if(window.__dshRecomputeLift)window.__dshRecomputeLift();}catch(e){}})()",
       null,
     )
     try {
@@ -728,6 +783,8 @@ class MainActivity : ComponentActivity() {
         onCheckAppUpdate = { startActivity(Intent(this, PhoneSettingsActivity::class.java)) },
         // v0.15.18：页面报告输入框聚焦/失焦 → 收缩/还原 WebView 高度，给键盘让位。
         onKeyboardVisibility = { visible -> runOnUiThread { applyKeyboardShrink(visible) } },
+        // 页面轮询用：键盘是否真的在显示（isAcceptingText，无需 DUMP 权限）。
+        onIsKeyboardShown = { isKeyboardShown() },
         onGetDevLogEnabled = { DevLogPrefs.isEnabled(this) },
         onSetDevLogEnabled = { enabled ->
           DevLogPrefs.setEnabled(this, enabled)
