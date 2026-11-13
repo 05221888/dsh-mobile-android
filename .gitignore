@@ -13,3 +13,4 @@ token*
 
 # 工具依赖（scripts/web-legacy 的构建期依赖，不需要入库）
 scripts/web-legacy/node_modules/
+replay_pid*.log
